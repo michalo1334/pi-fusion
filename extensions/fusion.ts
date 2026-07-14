@@ -127,16 +127,21 @@ function summarizeArgs(toolName: string, args: any): string {
 const HEAD_LINES = 6;
 
 /** Tool-call header: tool name + head of the lead's prompt, expandable to full text. */
-function renderPromptCall(name: string, prompt: string | undefined, theme: any, context: any): Text {
-  const lines = (prompt ?? "").trimEnd().split("\n");
-  const collapsed = !context.expanded && lines.length > HEAD_LINES;
-  const shown = collapsed ? lines.slice(0, HEAD_LINES) : lines;
-  let out = theme.fg("toolTitle", theme.bold(name));
-  for (const line of shown) out += `\n  ${theme.fg("muted", line)}`;
-  if (collapsed) {
-    out += `\n  ${theme.fg("dim", `… +${lines.length - HEAD_LINES} lines (${keyHint("app.tools.expand", "to expand")})`)}`;
-  }
-  return new Text(out, 0, 0);
+function renderPromptCall(
+	name: string,
+	prompt: string | undefined,
+	theme: any,
+	context: any,
+): Text {
+	const lines = (prompt ?? "").trimEnd().split("\n");
+	const collapsed = !context.expanded && lines.length > HEAD_LINES;
+	const shown = collapsed ? lines.slice(0, HEAD_LINES) : lines;
+	let out = theme.fg("toolTitle", theme.bold(name));
+	for (const line of shown) out += `\n  ${theme.fg("muted", line)}`;
+	if (collapsed) {
+		out += `\n  ${theme.fg("dim", `… +${lines.length - HEAD_LINES} lines (${keyHint("app.tools.expand", "to expand")})`)}`;
+	}
+	return new Text(out, 0, 0);
 }
 
 async function spawnSidekick(
@@ -337,7 +342,12 @@ export default function (pi: ExtensionAPI) {
 			}),
 		}),
 		renderCall(args, theme, context) {
-			return renderPromptCall(`follow_up ${args.task_id ?? ""}`, args.message, theme, context);
+			return renderPromptCall(
+				`follow_up ${args.task_id ?? ""}`,
+				args.message,
+				theme,
+				context,
+			);
 		},
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const task = tasks.get(params.task_id);

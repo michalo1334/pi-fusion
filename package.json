@@ -1,0 +1,24 @@
+{
+  "name": "pi-fusion",
+  "version": "0.1.0",
+  "description": "Lead/sidekick multi-model harness for pi — a frontier lead delegates work to a cheap sidekick agent with persistent per-task context (Devin Fusion pattern)",
+  "keywords": ["pi-package"],
+  "type": "module",
+  "pi": {
+    "extensions": ["./extensions"],
+    "skills": ["./skills"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@types/node": "^24",
+    "typebox": "^1",
+    "typescript": "^5"
+  },
+  "scripts": {
+    "check": "tsc --noEmit"
+  }
+}

@@ -1,12 +1,28 @@
 {
-  "name": "pi-fusion",
+  "name": "@jonibr/pi-fusion",
   "version": "0.1.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JoniBR/pi-fusion.git"
+  },
+  "files": [
+    "extensions",
+    "skills",
+    "README.md"
+  ],
   "description": "Lead/sidekick multi-model harness for pi — a frontier lead delegates work to a cheap sidekick agent with persistent per-task context (Devin Fusion pattern)",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "type": "module",
   "pi": {
-    "extensions": ["./extensions"],
-    "skills": ["./skills"]
+    "extensions": [
+      "./extensions"
+    ],
+    "skills": [
+      "./skills"
+    ]
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

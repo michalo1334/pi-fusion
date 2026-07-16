@@ -17,7 +17,8 @@ TASK BRIEF
 '
 
 # shellcheck disable=SC2086
-printf '%s' "$PREAMBLE$1" | claude -p --model "${FUSION_SIDEKICK_MODEL:-sonnet}" --output-format json \
+printf '%s' "$PREAMBLE$1" | claude -p --model "${FUSION_SIDEKICK_MODEL:-sonnet}" \
+	--output-format stream-json --verbose \
 	--allowedTools "Bash Edit Write Read Grep Glob WebFetch" \
 	${FUSION_SIDEKICK_ARGS:-} \
-	| node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);console.log(`session_id: ${j.session_id}\nstatus: ${j.subtype||"ok"}\n\n${j.result||"(sidekick produced no report)"}`)})'
+	| node "$(dirname "$0")/fusion-render.cjs"

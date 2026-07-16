@@ -1,0 +1,11 @@
+{
+	"name": "pi-fusion",
+	"owner": { "name": "JoniBR" },
+	"plugins": [
+		{
+			"name": "fusion",
+			"source": "./claude-plugin",
+			"description": "Lead/sidekick multi-model harness — delegate implement→test→lint loops to a cheap sidekick with persistent per-task context"
+		}
+	]
+}

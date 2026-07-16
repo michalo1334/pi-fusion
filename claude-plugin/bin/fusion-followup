@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# fusion-followup <session_id> "message" — continue an existing sidekick in its own context.
+# Env: FUSION_SIDEKICK_MODEL (default: sonnet), FUSION_SIDEKICK_ARGS (extra claude flags).
+set -euo pipefail
+[ $# -eq 2 ] || { echo 'usage: fusion-followup <session_id> "message"' >&2; exit 2; }
+
+# shellcheck disable=SC2086
+printf '%s' "$2" | claude -p --resume "$1" --model "${FUSION_SIDEKICK_MODEL:-sonnet}" --output-format json \
+	--allowedTools "Bash Edit Write Read Grep Glob WebFetch" \
+	${FUSION_SIDEKICK_ARGS:-} \
+	| node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);console.log(`session_id: ${j.session_id}\nstatus: ${j.subtype||"ok"}\n\n${j.result||"(sidekick produced no report)"}`)})'

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# fusion-delegate "task brief" — spawn a fresh sidekick agent, print its report + session_id.
+# Env: FUSION_SIDEKICK_MODEL (default: sonnet), FUSION_SIDEKICK_ARGS (extra claude flags).
+set -euo pipefail
+[ $# -eq 1 ] || { echo 'usage: fusion-delegate "task brief"' >&2; exit 2; }
+
+PREAMBLE='You are a sidekick agent executing a task brief from a lead engineer.
+
+Rules:
+- Carry out the complete task yourself: implement, verify (run tests/linters where applicable), and iterate until it works.
+- Work autonomously. Make reasonable decisions when details are ambiguous.
+- Do not commit unless the brief explicitly asks you to; the lead owns commits.
+- Your FINAL message must be a complete report: what you did and why, files changed, commands run with their results, and any decisions made or open questions. Never end with a bare "Done."
+
+TASK BRIEF
+----------
+'
+
+# shellcheck disable=SC2086
+printf '%s' "$PREAMBLE$1" | claude -p --model "${FUSION_SIDEKICK_MODEL:-sonnet}" --output-format json \
+	--allowedTools "Bash Edit Write Read Grep Glob WebFetch" \
+	${FUSION_SIDEKICK_ARGS:-} \
+	| node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);console.log(`session_id: ${j.session_id}\nstatus: ${j.subtype||"ok"}\n\n${j.result||"(sidekick produced no report)"}`)})'

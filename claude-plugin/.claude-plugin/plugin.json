@@ -1,0 +1,8 @@
+{
+	"name": "fusion",
+	"description": "Lead/sidekick multi-model harness — the lead delegates whole implement→test→lint loops to a cheap sidekick agent with persistent per-task context (Devin Fusion pattern)",
+	"version": "0.1.0",
+	"author": { "name": "JoniBR" },
+	"repository": "https://github.com/JoniBR/pi-fusion",
+	"license": "MIT"
+}

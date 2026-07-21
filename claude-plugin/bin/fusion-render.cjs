@@ -31,10 +31,22 @@ rl.on("line", (line) => {
 				process.stderr.write(`→ ${summarize(b.name, b.input)}\n`);
 		}
 	} else if (j.type === "result") {
-		const cost =
-			j.total_cost_usd != null
-				? `\ncost_usd: ${j.total_cost_usd.toFixed(4)}`
-				: "";
+		let cost = "";
+		if (j.total_cost_usd != null) {
+			cost = `\ncost_usd: ${j.total_cost_usd.toFixed(4)}`;
+			const file = process.env.FUSION_COST_FILE;
+			if (file) {
+				const fs = require("node:fs");
+				let total = j.total_cost_usd;
+				try {
+					total += Number(fs.readFileSync(file, "utf8")) || 0;
+				} catch {}
+				try {
+					fs.writeFileSync(file, String(total));
+				} catch {}
+				cost += `\nsidekick_total_usd: ${total.toFixed(4)} (all sidekick runs this session; NOT included in /cost)`;
+			}
+		}
 		console.log(
 			`session_id: ${j.session_id}\nstatus: ${j.subtype || "ok"}${cost}\n\n${j.result || "(sidekick produced no report)"}`,
 		);

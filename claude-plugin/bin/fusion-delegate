@@ -16,6 +16,9 @@ TASK BRIEF
 ----------
 '
 
+# Running per-session cost total; $PPID = Claude Code's persistent shell, stable per session.
+export FUSION_COST_FILE="${TMPDIR:-/tmp}/fusion-cost-${CLAUDE_SESSION_ID:-$PPID}"
+
 # shellcheck disable=SC2086
 printf '%s' "$PREAMBLE$1" | claude -p --model "${FUSION_SIDEKICK_MODEL:-sonnet}" \
 	--output-format stream-json --verbose \

@@ -15,6 +15,8 @@ Run via Bash (they are on PATH while this plugin is enabled):
 
 Sidekick runs can take several minutes: pass a generous Bash timeout (10+ minutes). Model defaults to `sonnet`; override with `FUSION_SIDEKICK_MODEL=<model>` before the command.
 
+Each run prints `cost_usd` (this run) and `sidekick_total_usd` (all sidekick runs this session). `/cost` does NOT include sidekick spend — quote `sidekick_total_usd` whenever you report cost or wrap up a task.
+
 ## Delegate early, by default
 
 - Take minimal reconnaissance actions, then hand off the entire implement → test → lint loop in ONE `fusion-delegate` brief. Your first action in a session can be a delegate.

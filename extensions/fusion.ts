@@ -194,7 +194,7 @@ async function runSidekick(options: {
 				details: any;
 		  }) => void)
 		| undefined;
-}): Promise<{ report: string; status: string }> {
+}): Promise<{ report: string; status: string; costUsd: number }> {
 	const { task, message, timeoutMs, signal, onUpdate } = options;
 	const sinceIndex = task.session.messages.length;
 	let status = "ok";
@@ -241,17 +241,27 @@ async function runSidekick(options: {
 	const errorMessage = task.session.agent.state.errorMessage;
 	if (status === "ok" && errorMessage) status = `error: ${errorMessage}`;
 
-	return { report: extractReport(task.session, sinceIndex), status };
+	const costUsd = task.session.messages
+		.slice(sinceIndex)
+		.reduce(
+			(sum, m: any) =>
+				sum + (m.role === "assistant" ? (m.usage?.cost?.total ?? 0) : 0),
+			0,
+		);
+
+	return { report: extractReport(task.session, sinceIndex), status, costUsd };
 }
 
 function formatResult(
 	task: Task,
 	status: string,
 	report: string,
+	costUsd: number,
 ): { content: [{ type: "text"; text: string }]; details: any } {
 	const header = [
 		`task_id: ${task.id}`,
 		`status: ${status}`,
+		`cost_usd: ${costUsd.toFixed(4)} (included in session total)`,
 		task.session.sessionFile
 			? `sidekick session: ${task.session.sessionFile}`
 			: undefined,
@@ -271,6 +281,27 @@ export default function (pi: ExtensionAPI) {
 	const tasks = new Map<string, Task>();
 	let nextId = 1;
 	let modelOverride: string | undefined;
+	// Sidekick cost not yet folded into the lead session's usage totals.
+	let pendingCost = 0;
+
+	// Fold accumulated sidekick cost into the next finalized lead assistant
+	// message — the footer and /session sum usage.cost.total over these.
+	pi.on("message_end", async (event) => {
+		if (event.message.role !== "assistant" || pendingCost <= 0) return;
+		const add = pendingCost;
+		pendingCost = 0;
+		const usage = (event.message as any).usage;
+		if (!usage?.cost) return;
+		return {
+			message: {
+				...event.message,
+				usage: {
+					...usage,
+					cost: { ...usage.cost, total: usage.cost.total + add },
+				},
+			},
+		};
+	});
 
 	pi.registerCommand("fusion-model", {
 		description:
@@ -319,14 +350,15 @@ export default function (pi: ExtensionAPI) {
 			const session = await spawnSidekick(ctx, cfg);
 			const task: Task = { id: `t${nextId++}`, session, log: [] };
 			tasks.set(task.id, task);
-			const { report, status } = await runSidekick({
+			const { report, status, costUsd } = await runSidekick({
 				task,
 				message: PREAMBLE + params.brief,
 				timeoutMs: cfg.timeoutMinutes * 60_000,
 				signal,
 				onUpdate,
 			});
-			return formatResult(task, status, report);
+			pendingCost += costUsd;
+			return formatResult(task, status, report, costUsd);
 		},
 	});
 
@@ -358,14 +390,15 @@ export default function (pi: ExtensionAPI) {
 				);
 			}
 			const cfg = readConfig(ctx.cwd, modelOverride);
-			const { report, status } = await runSidekick({
+			const { report, status, costUsd } = await runSidekick({
 				task,
 				message: params.message,
 				timeoutMs: cfg.timeoutMinutes * 60_000,
 				signal,
 				onUpdate,
 			});
-			return formatResult(task, status, report);
+			pendingCost += costUsd;
+			return formatResult(task, status, report, costUsd);
 		},
 	});
 

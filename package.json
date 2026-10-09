@@ -1,24 +1,25 @@
 {
-  "name": "@jonibr/pi-fusion",
-  "version": "0.1.1",
+  "name": "@michalo1334/pi-fusion",
+  "version": "0.2.0",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/JoniBR/pi-fusion.git"
+    "url": "git+https://github.com/michalo1334/pi-fusion.git"
   },
   "files": [
     "extensions",
     "skills",
-    "README.md"
+    "README.md",
+    "PROVENANCE.md"
   ],
-  "description": "Lead/sidekick multi-model harness for pi — a frontier lead delegates work to a cheap sidekick agent with persistent per-task context (Devin Fusion pattern)",
+  "description": "Pi lead/sidekick package with persistent delegated tasks and an explicit sidekick tool policy",
   "keywords": [
     "pi-package"
   ],
   "type": "module",
   "pi": {
     "extensions": [
-      "./extensions"
+      "./extensions/fusion.ts"
     ],
     "skills": [
       "./skills"
@@ -30,13 +31,14 @@
     "typebox": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-coding-agent": "^1.0.2",
     "@earendil-works/pi-tui": "*",
     "@types/node": "^24",
     "typebox": "^1",
     "typescript": "^5"
   },
   "scripts": {
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "node --test tests/*.test.ts"
   }
 }

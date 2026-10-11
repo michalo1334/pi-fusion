@@ -114,6 +114,8 @@ export interface PartialCreatedSurface {
   placement: Placement;
   creationOutput: string;
   reason: string;
+  /** Trusted only when the controller identified the returned terminal pane. */
+  surface?: ZellijSurface;
 }
 
 export class SurfaceCreationError extends Error {
@@ -200,17 +202,26 @@ export class ZellijController implements ZellijOperations {
 
     return withPlacementLock(async () => {
       const before = await this.listPanes();
+      let createdSurface: ZellijSurface | undefined;
       try {
-        const surface = await this.tryPlacement(input, before);
+        createdSurface = await this.tryPlacement(input, before);
         await this.restoreFocus(input.parentPaneId);
-        return surface;
+        return createdSurface;
       } catch (error) {
         try {
           await this.restoreFocus(input.parentPaneId);
         } catch (restoreError) {
-          throw new Error(
+          const partial = error instanceof SurfaceCreationError ? error.partial : undefined;
+          throw new SurfaceCreationError(
             `Zellij surface creation failed (${error instanceof Error ? error.message : String(error)}); `
             + `focus restoration failed (${restoreError instanceof Error ? restoreError.message : String(restoreError)})`,
+            {
+              parentPaneId: input.parentPaneId,
+              placement: partial?.placement ?? input.placement,
+              creationOutput: partial?.creationOutput ?? "",
+              reason: restoreError instanceof Error ? restoreError.message : String(restoreError),
+              surface: createdSurface ?? partial?.surface,
+            },
           );
         }
         throw error;

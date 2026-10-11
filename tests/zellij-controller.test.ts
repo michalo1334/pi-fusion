@@ -82,6 +82,17 @@ test("FP-03 Unit: WHEN creation fails, THEN focus restoration is attempted", asy
   assert.deepEqual(h.calls.at(-1), ["action", "focus-pane-id", "terminal_1"]);
 });
 
+test("FP-07/Unit: WHEN focus restore fails after a terminal is created, SHALL preserve its trusted surface identity", async () => {
+  const h = harness([panes([1]), { stdout: "terminal_9", stderr: "" }, new Error("focus failed"), new Error("restore failed")]);
+  await assert.rejects(() => new ZellijController(h.execute).createSurface({
+    parentPaneId: "terminal_1", placement: { kind: "split", direction: "right" },
+  }), (error: unknown) => {
+    const value = error as { partial?: { surface?: { paneId: string } } };
+    assert.equal(value.partial?.surface?.paneId, "terminal_9");
+    return true;
+  });
+});
+
 test("FP-03 Unit: WHEN sending a script, THEN its quoted path is targeted explicitly", async () => {
   const h = harness([]);
   await new ZellijController(h.execute).sendCommand({ paneId: "terminal_4", parentPaneId: "terminal_1" }, "/tmp/a file's.sh");

@@ -21,6 +21,8 @@ export interface ChildLaunchSpec {
   promptPath: string;
   systemPromptPath: string;
   childRuntimePath: string;
+  /** Keep failed panes inspectable when the wrapper runs in the production Zellij surface. */
+  holdFailurePane?: boolean;
 }
 
 export interface RunArtifacts {
@@ -31,6 +33,7 @@ export interface RunArtifacts {
   pidPath: string;
   exitPath: string;
   runtimeErrorPath: string;
+  cancelPath: string;
 }
 
 export interface ProcessIdentity {
@@ -160,6 +163,11 @@ export function writeRuntimeError(file: string, runId: string, error: string): v
   atomicWrite(file, JSON.stringify({ runId, error: error.trim() }) + "\n");
 }
 
+export function requestRunCancellation(file: string, runId: string): void {
+  if (!validRunId(runId)) throw new Error("Invalid run ID");
+  atomicWrite(file, `${runId}\n`);
+}
+
 function readExit(file: string, runId: string): ExitRecord | undefined {
   try {
     const value = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<ExitRecord>;
@@ -229,7 +237,7 @@ export async function pollRun(control: RunControl): Promise<PollOutcome> {
 function assertArtifactPaths(artifacts: RunArtifacts): void {
   const runDir = path.resolve(artifacts.runDir);
   if (fs.existsSync(runDir) && fs.lstatSync(runDir).isSymbolicLink()) throw new Error("Run artifact directory must not be a symlink");
-  for (const file of [artifacts.promptPath, artifacts.systemPromptPath, artifacts.pidPath, artifacts.exitPath, artifacts.runtimeErrorPath]) {
+  for (const file of [artifacts.promptPath, artifacts.systemPromptPath, artifacts.pidPath, artifacts.exitPath, artifacts.runtimeErrorPath, artifacts.cancelPath]) {
     const resolved = path.resolve(file);
     if (resolved !== runDir && !resolved.startsWith(`${runDir}${path.sep}`)) throw new Error("Run artifact path escapes its run directory");
   }
@@ -245,23 +253,28 @@ const runId = ${JSON.stringify(spec.runId)};
 const pidPath = ${JSON.stringify(artifacts.pidPath)};
 const errorPath = ${JSON.stringify(artifacts.runtimeErrorPath)};
 const exitPath = ${JSON.stringify(artifacts.exitPath)};
+const cancelPath = ${JSON.stringify(artifacts.cancelPath)};
 const atomic = (file, value) => { const tmp = file + ".tmp-" + process.pid + "-" + Math.random().toString(36).slice(2); writeFileSync(tmp, JSON.stringify(value) + "\\n", { mode: 0o600 }); renameSync(tmp, file); };
 const identity = (pid) => { if (process.platform !== "linux") throw new Error("Safe PID identity checks are supported only on Linux"); const stat = readFileSync("/proc/" + pid + "/stat", "utf8").trim(); const close = stat.lastIndexOf(")"); if (close < 0) throw new Error("Invalid Linux process identity record"); const fields = stat.slice(close + 2).trim().split(/\\s+/); if (fields.length <= 19 || !/^\\d+$/.test(fields[19])) throw new Error("Incomplete Linux process identity record"); return { platform: "linux", pid, startTime: fields[19], state: fields[0] }; };
 const explicitEnv = ${JSON.stringify(launch.env)};
-const childEnv = { ...process.env, ...explicitEnv, PI_FUSION_RUNTIME_ERROR_PATH: errorPath };
+const childEnv = { ...process.env, ...explicitEnv, PI_FUSION_RUNTIME_ERROR_PATH: errorPath, PI_FUSION_CANCEL_PATH: cancelPath };
+const cancellationRequested = () => { try { return readFileSync(cancelPath, "utf8").trim() === runId; } catch { return false; } };
 let finalized = false;
+let stopRequested = false;
 let child;
 let launchError;
-const finish = (code, spawnError) => { if (finalized) return; finalized = true; let runtimeError; try { const value = JSON.parse(readFileSync(errorPath, "utf8")); if (value.runId === runId && typeof value.error === "string" && value.error.trim()) runtimeError = value.error.trim(); } catch {} const failure = spawnError || launchError; const failed = runtimeError !== undefined; const exitCode = failed ? 78 : (launchError && !spawnError ? 78 : code); atomic(exitPath, { runId, exitCode, finishedAt: new Date().toISOString(), ...(failure ? { error: failure } : {}), ...(failed ? { error: runtimeError, policyFailure: true } : {}) }); process.exitCode = exitCode === null ? 1 : exitCode; };
-const handleTerminalSignal = (signal) => { if (finalized || !child || child.killed) return; try { child.kill(signal); } catch {} };
+const finish = (code, spawnError) => { if (finalized) return; finalized = true; let runtimeError; try { const value = JSON.parse(readFileSync(errorPath, "utf8")); if (value.runId === runId && typeof value.error === "string" && value.error.trim()) runtimeError = value.error.trim(); } catch {} const failure = spawnError || launchError; const failed = runtimeError !== undefined; const exitCode = failed ? 78 : (launchError && !spawnError ? 78 : code); atomic(exitPath, { runId, exitCode, finishedAt: new Date().toISOString(), ...(failure ? { error: failure } : {}), ...(failed ? { error: runtimeError, policyFailure: true } : {}) }); process.exitCode = exitCode === null ? 1 : exitCode; if (exitCode !== 0 && process.env.PI_FUSION_HOLD_FAILURE === "1") { process.stdin.resume(); setInterval(() => {}, 1000); } };
+const handleTerminalSignal = (signal) => { if (finalized) return; if (!child || child.killed) { stopRequested = true; return; } try { child.kill(signal); } catch {} };
 process.on("SIGINT", () => handleTerminalSignal("SIGINT"));
 process.on("SIGTERM", () => handleTerminalSignal("SIGTERM"));
 process.on("SIGHUP", () => handleTerminalSignal("SIGHUP"));
 try {
+  if (stopRequested || cancellationRequested()) { finish(130); }
+  else {
   const isolated = !process.stdin.isTTY && !process.stdout.isTTY;
   child = spawn(${JSON.stringify(launch.executable)}, ${JSON.stringify(launch.args)}, { cwd: ${JSON.stringify(spec.cwd)}, env: childEnv, stdio: "inherit", detached: isolated });
   child.once("error", error => finish(null, error.message));
-  child.once("exit", code => finish(code, launchError));
+  child.once("exit", (code, signal) => finish(code ?? (signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 1), launchError));
   if (Number.isInteger(child.pid) && child.pid > 0) {
     try { atomic(pidPath, { runId, pid: child.pid, identity: identity(child.pid), ...(isolated ? { processGroupId: child.pid } : {}) }); }
     catch (error) {
@@ -270,9 +283,11 @@ try {
       const forceStop = setTimeout(() => { if (!finalized) { try { child.kill("SIGKILL"); } catch {} } }, 250);
       forceStop.unref?.();
     }
+    if (cancellationRequested()) { stopRequested = true; try { child.kill("SIGTERM"); } catch {} }
   } else {
     launchError = "Child process did not provide a PID; safe ownership could not be established";
     try { child.kill("SIGTERM"); } catch {}
+  }
   }
 } catch (error) { finish(null, error instanceof Error ? error.message : String(error)); }
 `;
@@ -400,6 +415,7 @@ export function allocateRunArtifacts(root: string, taskId: string, runId: string
     pidPath: path.join(runDir, "pid"),
     exitPath: path.join(runDir, "exit.json"),
     runtimeErrorPath: path.join(runDir, "runtime-error.json"),
+    cancelPath: path.join(runDir, "cancel"),
   };
   assertArtifactPaths(artifacts);
   return artifacts;
@@ -464,7 +480,7 @@ export function createLaunchSpec(spec: ChildLaunchSpec): { executable: string; a
     args: [...executable.prefix, ...buildChildArgs(spec)],
     // The wrapper merges these values with process.env when it runs in the pane.
     // Never snapshot credentials or ZELLIJ_PANE_ID in the parent process.
-    env: { PI_FUSION_CHILD: "1", PI_FUSION_TASK_ID: spec.taskId, PI_FUSION_RUN_ID: spec.runId, PI_FUSION_TOOLS: spec.tools.join(",") },
+    env: { PI_FUSION_CHILD: "1", PI_FUSION_TASK_ID: spec.taskId, PI_FUSION_RUN_ID: spec.runId, PI_FUSION_TOOLS: spec.tools.join(","), ...(spec.holdFailurePane ? { PI_FUSION_HOLD_FAILURE: "1" } : {}) },
   };
 }
 

@@ -23,3 +23,13 @@ test("FP-05: generation creates a pane command and does not spawn the child", ()
   assert.equal(fs.existsSync(artifacts.pidPath), false);
   assert.equal(fs.existsSync(artifacts.exitPath), false);
 });
+
+test("FP-07: generated wrapper reads the run cancellation marker before and after PID ownership", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fp07-wrapper-"));
+  const artifacts = allocateRunArtifacts(root, "task", "run");
+  const command = createLaunchCommand({ taskId: "task", runId: "run", cwd: root, artifactRoot: root, sessionDir: root, sessionId: "session", model: { provider: "p", id: "m", thinking: "off" }, tools: [], extensions: [], promptPath: "/tmp/p", systemPromptPath: "/tmp/s", childRuntimePath: "/tmp/r", holdFailurePane: true }, artifacts);
+  const source = fs.readFileSync(command[1], "utf8");
+  assert.match(source, /cancellationRequested/);
+  assert.match(source, /atomic\(pidPath/);
+  assert.match(source, /child\.kill\("SIGTERM"\)/);
+});

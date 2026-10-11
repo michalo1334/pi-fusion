@@ -20,10 +20,16 @@ copy them into `.pi/extensions/` or `.pi/skills/`. Restart Pi after installation
 
 ## Tools
 
-- `delegate(brief)` starts a sidekick with a new context. It returns a report and a `task_id`.
-- `follow_up(task_id, message)` continues that sidekick context. A task ID works only while the same Pi process runs. Pi
-  saves the sidekick session file. You can inspect it with `pi --resume` after a restart, but `follow_up` cannot reopen
-  it.
+- `delegate(brief)` starts one restricted child Pi TUI in an owned Zellij pane. It blocks until the child turn settles and
+  returns the report, status, cost, session path, and a `task_id`.
+- Zellij must be active before `delegate` runs. Pi Fusion checks both the host Zellij marker and the `zellij` executable.
+  It keeps lead focus, targets the created pane by ID, and uses split, stacked, and tab placement fallbacks.
+- Successful panes close through the lead. Failed, interrupted, timed-out, or lost runs keep their pane and artifacts for
+  inspection. Prompts stay in private run files; the pane receives an artifact wrapper command.
+- `follow_up(task_id, message)` is reserved for the child-session resume integration in FP-08. The current transitional
+  build returns an explicit error and never creates an in-process SDK sidekick.
+- Task IDs and child sessions are process-local to the lead. Child session files and run sidecars remain on disk for
+  inspection. A task is not silently resumed after a Pi restart.
 
 ## Lead skill
 
@@ -32,9 +38,9 @@ manifest. The lead loads it before delegation. The sidekick does not load it.
 
 ## Sidekick environment
 
-The sidekick reads project context files, including `AGENTS.md`. It does not load skills, prompt templates, or themes.
-It does not load arbitrary project extensions. It cannot call `delegate` or `follow_up`, so it cannot create or continue
-nested sidekicks. Configuration that requests those tools or the Fusion extension fails before the sidekick starts.
+The child loads no discovered context files, skills, prompt templates, themes, or arbitrary project extensions. It loads
+only the selected explicit extensions and the child runtime. It cannot call `delegate` or `follow_up`, so it cannot create
+nested sidekicks. Configuration that requests those tools or the Fusion extension fails before the child starts.
 
 `fusion.sidekickTools` is an exact tool allowlist. The supported values are:
 

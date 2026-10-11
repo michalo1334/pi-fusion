@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { assertNoRecursiveFusionTools } from "./sidekick-policy.ts";
+import { writeRuntimeError } from "./child-process.ts";
 
 export interface ChildPolicyFailure { message: string; }
 
@@ -57,12 +58,25 @@ export default function childRuntime(pi: ExtensionAPI): void {
   if (process.env.PI_FUSION_CHILD !== "1") return;
 
   let policyFailure: ChildPolicyFailure | undefined;
+  let pendingRuntimeError: string | undefined;
   let shuttingDown = false;
+  const recordRuntimeError = (message: string) => {
+    const runId = process.env.PI_FUSION_RUN_ID;
+    const file = process.env.PI_FUSION_RUNTIME_ERROR_PATH;
+    if (!runId || !file) return;
+    try { writeRuntimeError(file, runId, message); }
+    catch (error) {
+      // Keep the child non-zero if the diagnostic sidecar cannot be written.
+      process.exitCode = 78;
+      pendingRuntimeError = `${message}; could not write runtime error sidecar: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  };
   const fail = (ctx: { shutdown: () => void }, error: unknown) => {
     if (policyFailure) return;
     policyFailure = { message: error instanceof Error ? error.message : String(error) };
     process.exitCode = 78;
     disableChildTools(pi);
+    recordRuntimeError(`Fusion child policy failure: ${policyFailure.message}`);
     if (!shuttingDown) { shuttingDown = true; ctx.shutdown(); }
   };
   pi.on("session_start", () => {
@@ -84,10 +98,22 @@ export default function childRuntime(pi: ExtensionAPI): void {
     return undefined;
   });
 
+  pi.on("agent_end", (event) => {
+    const failures = event.messages
+      .map(message => {
+        const value = message as unknown as { stopReason?: string; errorMessage?: string };
+        if (value.stopReason !== "error") return undefined;
+        return value.errorMessage?.trim() || "Child Pi reported a provider or runtime error";
+      })
+      .filter((message): message is string => Boolean(message));
+    pendingRuntimeError = failures.at(-1);
+  });
+
   let shutdownRequested = false;
-  pi.on("agent_settled", (_event, ctx) => {
+  pi.on("agent_settled", (event, ctx) => {
     if (shutdownRequested) return;
     shutdownRequested = true;
+    if (!event.aborted && pendingRuntimeError) recordRuntimeError(`Fusion child runtime failure: ${pendingRuntimeError}`);
     ctx.shutdown();
   });
 }

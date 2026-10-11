@@ -3,7 +3,12 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { allocateRunArtifacts, buildChildArgs, createPromptArtifact, resolvePiExecutable } from "../extensions/child-process.ts";
+import { allocateRunArtifacts, buildChildArgs, createPromptArtifact, parseProcStat, resolvePiExecutable } from "../extensions/child-process.ts";
+
+test("FP-05/Unit: Linux process identity parsing handles spaces and parentheses in comm", () => {
+  const fields = ["R", ...Array.from({ length: 18 }, (_, index) => String(index + 1)), "987654", "0", "0"];
+  assert.deepEqual(parseProcStat(`123 (worker (with spaces)) ${fields.join(" ")}`), { pid: 123, state: "R", startTime: "987654" });
+});
 
 test("FP-04/EARS: allocates unique private run artifacts", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-test-"));

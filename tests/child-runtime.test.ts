@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import childRuntime from "../extensions/child-runtime.ts";
 
 type Handler = (event: unknown, ctx: { shutdown: () => void }) => void;
@@ -59,6 +62,33 @@ test("FP-01 Unit: WHEN the process is not a marked child, the runtime SHALL not 
   } finally {
     if (previous === undefined) delete process.env.PI_FUSION_CHILD;
     else process.env.PI_FUSION_CHILD = previous;
+  }
+});
+
+test("FP-05/EARS: WHEN the child reports a runtime error, THE runtime SHALL write a matching atomic sidecar", () => {
+  const old = { child: process.env.PI_FUSION_CHILD, run: process.env.PI_FUSION_RUN_ID, file: process.env.PI_FUSION_RUNTIME_ERROR_PATH };
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-runtime-error-"));
+  const file = path.join(root, "runtime-error.json");
+  process.env.PI_FUSION_CHILD = "1";
+  process.env.PI_FUSION_RUN_ID = "run-1";
+  process.env.PI_FUSION_RUNTIME_ERROR_PATH = file;
+  try {
+    let agentEnd: ((event: any) => void) | undefined;
+    let settled: ((event: any, ctx: { shutdown: () => void }) => void) | undefined;
+    const pi = { getAllTools: () => [], getActiveTools: () => [], setActiveTools: () => undefined, on(event: string, handler: any) {
+      if (event === "agent_end") agentEnd = handler;
+      if (event === "agent_settled") settled = handler;
+      return () => undefined;
+    }} as unknown as Parameters<typeof childRuntime>[0];
+    childRuntime(pi);
+    agentEnd?.({ messages: [{ stopReason: "error", errorMessage: "provider request failed" }] });
+    settled?.({ aborted: false }, { shutdown: () => undefined });
+    const record = JSON.parse(fs.readFileSync(file, "utf8"));
+    assert.deepEqual(record, { runId: "run-1", error: "Fusion child runtime failure: provider request failed" });
+  } finally {
+    for (const [key, value] of Object.entries({ PI_FUSION_CHILD: old.child, PI_FUSION_RUN_ID: old.run, PI_FUSION_RUNTIME_ERROR_PATH: old.file })) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
   }
 });
 

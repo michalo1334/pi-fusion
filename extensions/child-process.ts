@@ -473,3 +473,19 @@ export function defaultArtifactRoot(): string {
   fs.chmodSync(root, 0o700);
   return root;
 }
+
+export {
+  captureSessionCursor,
+  createSessionCursor,
+  readIncrementalResult,
+  readRunResult,
+  SessionIntegrityError,
+} from "./session-parser.ts";
+export type {
+  ExitStatus,
+  ReadRunOptions,
+  RunOutcome,
+  RunResult,
+  SessionCursor,
+  Usage,
+} from "./session-parser.ts";

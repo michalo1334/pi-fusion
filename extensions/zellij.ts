@@ -183,7 +183,8 @@ function parsePanes(stdout: string): PaneInfo[] {
   });
 }
 
-function paneIdFromInfo(pane: PaneInfo): string {
+function paneIdFromInfo(pane: PaneInfo): string | undefined {
+  if (pane.is_plugin) return undefined;
   return `terminal_${pane.id}`;
 }
 
@@ -296,18 +297,20 @@ export class ZellijController implements ZellijOperations {
 
   private async findNewTerminal(before: PaneInfo[], tabId: number): Promise<string> {
     const after = await this.listPanes();
-    const oldIds = new Set(before.map(paneIdFromInfo));
-    const created = after.filter(pane => !pane.is_plugin && !pane.exited && pane.tab_id === tabId && !oldIds.has(paneIdFromInfo(pane)));
+    const oldIds = new Set(before.filter(pane => !pane.is_plugin).map(paneIdFromInfo));
+    const created = after.filter(pane => !pane.is_plugin && !pane.exited && pane.tab_id === tabId
+      && !oldIds.has(paneIdFromInfo(pane)));
     if (created.length !== 1) throw new Error(`Zellij reported ${created.length} ambiguous terminal panes in parent tab`);
-    return paneIdFromInfo(created[0]);
+    return paneIdFromInfo(created[0])!;
   }
 
   private async findNewTerminalInTab(before: PaneInfo[], tabId: number): Promise<string> {
     const after = await this.listPanes();
-    const oldIds = new Set(before.map(paneIdFromInfo));
-    const created = after.filter(pane => !pane.is_plugin && !pane.exited && pane.tab_id === tabId && !oldIds.has(paneIdFromInfo(pane)));
+    const oldIds = new Set(before.filter(pane => !pane.is_plugin).map(paneIdFromInfo));
+    const created = after.filter(pane => !pane.is_plugin && !pane.exited && pane.tab_id === tabId
+      && !oldIds.has(paneIdFromInfo(pane)));
     if (created.length !== 1) throw new Error(`Zellij reported ${created.length} ambiguous terminal panes in new tab ${tabId}`);
-    return paneIdFromInfo(created[0]);
+    return paneIdFromInfo(created[0])!;
   }
 
   private async restoreFocus(parentPaneId: string): Promise<void> {
@@ -345,7 +348,7 @@ export class ZellijController implements ZellijOperations {
   async paneExists(surface: ZellijSurface): Promise<boolean> {
     this.assertSurface(surface);
     const panes = await this.listPanes();
-    return panes.some(pane => !pane.exited && paneIdFromInfo(pane) === surface.paneId);
+    return panes.some(pane => !pane.is_plugin && !pane.exited && paneIdFromInfo(pane) === surface.paneId);
   }
 
   async screen(surface: ZellijSurface, full = false): Promise<string> {

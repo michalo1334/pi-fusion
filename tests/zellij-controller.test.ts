@@ -108,17 +108,62 @@ test("FP-03 Unit: WHEN IDs are invalid, THEN no command is sent", async () => {
   assert.equal(h.calls.length, 0);
 });
 
+test("FP-16 Unit: WHEN a plugin and terminal share an ID, THEN only the terminal is live", async () => {
+  const h = harness([{
+    stdout: JSON.stringify([
+      { id: 4, is_plugin: true, is_focused: false, exited: false, tab_id: 3 },
+      { id: 4, is_plugin: false, is_focused: false, exited: false, tab_id: 3 },
+    ]), stderr: "",
+  }]);
+  const controller = new ZellijController(h.execute);
+  assert.equal(await controller.paneExists({ paneId: "terminal_4", parentPaneId: "terminal_1" }), true);
+
+  const gone = harness([{
+    stdout: JSON.stringify([{ id: 4, is_plugin: true, is_focused: false, exited: false, tab_id: 3 }]), stderr: "",
+  }]);
+  const goneController = new ZellijController(gone.execute);
+  assert.equal(await goneController.paneExists({ paneId: "terminal_4", parentPaneId: "terminal_1" }), false);
+});
+
+test("FP-16 Unit: WHEN only a plugin existed before creation, SHALL discover the new terminal", async () => {
+  const h = harness([
+    {
+      stdout: JSON.stringify([
+        { id: 1, is_plugin: false, is_focused: true, exited: false, tab_id: 3, pane_rows: 40, pane_columns: 120 },
+        { id: 4, is_plugin: true, is_focused: false, exited: false, tab_id: 3 },
+      ]), stderr: "",
+    },
+    { stdout: "7", stderr: "" },
+    tab(7, [4], [4]),
+    { stdout: "", stderr: "" },
+  ]);
+  const surface = await new ZellijController(h.execute).createSurface({
+    parentPaneId: "terminal_1", placement: { kind: "tab" }, command: ["pi"],
+  });
+  assert.equal(surface.paneId, "terminal_4");
+});
+
 test("FP-03 Unit: WHEN pane query fails, THEN the error is preserved", async () => {
   const h = harness([new Error("query failed")]);
   await assert.rejects(() => new ZellijController(h.execute).paneExists({ paneId: "terminal_4", parentPaneId: "terminal_1" }), /query failed/);
 });
 
-test("FP-03 Unit: WHEN a pane is already gone, THEN repeated close and interrupt are idempotent", async () => {
-  const h = harness([new Error("gone"), panes([]), new Error("gone"), panes([])]);
+test("FP-16 Unit: WHEN close or interrupt finds only a colliding plugin, SHALL remain idempotent", async () => {
+  const pluginOnly = {
+    stdout: JSON.stringify([{ id: 4, is_plugin: true, is_focused: false, exited: false, tab_id: 3 }]),
+    stderr: "",
+  };
+  const h = harness([new Error("gone"), pluginOnly, new Error("gone"), pluginOnly]);
   const controller = new ZellijController(h.execute);
   const surface = { paneId: "terminal_4", parentPaneId: "terminal_1" };
   await controller.close(surface);
   await controller.interrupt(surface);
+  assert.deepEqual(h.calls, [
+    ["action", "close-pane", "--pane-id", "terminal_4"],
+    ["action", "list-panes", "--json", "--all"],
+    ["action", "send-keys", "--pane-id", "terminal_4", "Ctrl c"],
+    ["action", "list-panes", "--json", "--all"],
+  ]);
 });
 
 test("FP-03 Unit: WHEN screen is requested, THEN dump-screen targets the pane", async () => {

@@ -509,6 +509,9 @@ export function createFusionExtension(pi: ExtensionAPI, dependencies: FusionRunt
         timeoutMs,
         requireExistingSession,
         expectedSessionCursor: requireExistingSession ? task.lastRun?.cursor : undefined,
+        ...(requireExistingSession && task.lastRun?.status !== "ok" && task.lastRun?.surface && task.lastRun.artifacts.launchPath
+          ? { retainedFailureSurface: { surface: task.lastRun.surface, launchPath: task.lastRun.artifacts.launchPath } }
+          : {}),
       }, signal, generation, childRunner, state => {
         if (!current()) return;
         task.cleanupPending = state.pending;

@@ -51,6 +51,24 @@ test("FP-03 Unit: WHEN the user focus changes, THEN creation does not use focus 
   assert.equal(h.options[1], undefined);
 });
 
+test("FP-17 Unit: WHEN a valid parent terminal has null command metadata, THEN creation still uses it", async () => {
+  const h = harness([{
+    stdout: JSON.stringify([{
+      id: 1, is_plugin: false, is_focused: true, exited: false, tab_id: 3,
+      pane_rows: 40, pane_columns: 120, terminal_command: null,
+    }]), stderr: "",
+  }, { stdout: "terminal_9", stderr: "" }, { stdout: "", stderr: "" }]);
+  const surface = await new ZellijController(h.execute).createSurface({
+    parentPaneId: "terminal_1", placement: { kind: "split", direction: "right" }, command: ["pi"],
+  });
+  assert.deepEqual(surface, { paneId: "terminal_9", parentPaneId: "terminal_1" });
+  assert.deepEqual(h.calls, [
+    ["action", "list-panes", "--json", "--all"],
+    ["action", "new-pane", "--no-focus", "--near-current-pane", "--direction", "right", "--", "pi"],
+    ["action", "focus-pane-id", "terminal_1"],
+  ]);
+});
+
 test("FP-03 Unit: WHEN split creation fails, THEN controller falls back to stacked and then tab", async () => {
   const h = harness([
     panes([1]), new Error("split unavailable"), new Error("stack unavailable"),
@@ -162,6 +180,63 @@ test("FP-16 Unit: WHEN close or interrupt finds only a colliding plugin, SHALL r
     ["action", "close-pane", "--pane-id", "terminal_4"],
     ["action", "list-panes", "--json", "--all"],
     ["action", "send-keys", "--pane-id", "terminal_4", "Ctrl c"],
+    ["action", "list-panes", "--json", "--all"],
+  ]);
+});
+
+test("FP-17 Unit: WHEN a retained terminal contains its exact launch path, THEN it closes before a follow-up can be placed", async () => {
+  const launchPath = "/private/runs/old/launch.mjs";
+  const h = harness([{
+    stdout: JSON.stringify([{ id: 4, is_plugin: false, is_focused: false, exited: false, tab_id: 3, terminal_command: `node ${launchPath}` }]), stderr: "",
+  }]);
+  const controller = new ZellijController(h.execute);
+  assert.equal(await controller.closeRetainedSurface({ surface: { paneId: "terminal_4", parentPaneId: "terminal_1" }, launchPath }), "closed");
+  assert.deepEqual(h.calls, [
+    ["action", "list-panes", "--json", "--all"],
+    ["action", "close-pane", "--pane-id", "terminal_4"],
+  ]);
+});
+
+test("FP-17 Unit: WHEN a retained pane is missing, reused, or collides with a plugin, THEN it is not closed", async () => {
+  const launchPath = "/private/runs/old/launch.mjs";
+  const surface = { paneId: "terminal_4", parentPaneId: "terminal_1" };
+  const cases = [
+    [],
+    [{ id: 4, is_plugin: false, is_focused: false, exited: false, tab_id: 3, pane_command: null, terminal_command: null }],
+    [{ id: 4, is_plugin: false, is_focused: false, exited: false, tab_id: 3, pane_command: "node /private/runs/new/launch.mjs" }],
+    [
+      { id: 4, is_plugin: true, is_focused: false, exited: false, tab_id: 3, terminal_command: `node ${launchPath}` },
+      { id: 4, is_plugin: false, is_focused: false, exited: false, tab_id: 3, terminal_command: "node /private/runs/new/launch.mjs" },
+    ],
+  ];
+  for (const listed of cases) {
+    const h = harness([{ stdout: JSON.stringify(listed), stderr: "" }]);
+    assert.equal(await new ZellijController(h.execute).closeRetainedSurface({ surface, launchPath }), "not-found-or-unowned");
+    assert.deepEqual(h.calls, [["action", "list-panes", "--json", "--all"]]);
+  }
+});
+
+test("FP-17 Unit: WHEN cancellation is observed after retained-pane lookup, THEN it does not close the pane", async () => {
+  const launchPath = "/private/runs/old/launch.mjs";
+  const h = harness([{
+    stdout: JSON.stringify([{ id: 4, is_plugin: false, is_focused: false, exited: false, tab_id: 3, pane_command: `node ${launchPath}` }]), stderr: "",
+  }]);
+  assert.equal(await new ZellijController(h.execute).closeRetainedSurface({
+    surface: { paneId: "terminal_4", parentPaneId: "terminal_1" }, launchPath, isCancelled: () => true,
+  }), "cancelled");
+  assert.deepEqual(h.calls, [["action", "list-panes", "--json", "--all"]]);
+});
+
+test("FP-17 Unit: WHEN a verified retained pane remains after close failure, THEN the failure is explicit", async () => {
+  const launchPath = "/private/runs/old/launch.mjs";
+  const owned = { stdout: JSON.stringify([{ id: 4, is_plugin: false, is_focused: false, exited: false, tab_id: 3, pane_command: `node ${launchPath}` }]), stderr: "" };
+  const h = harness([owned, new Error("close denied"), owned]);
+  await assert.rejects(() => new ZellijController(h.execute).closeRetainedSurface({
+    surface: { paneId: "terminal_4", parentPaneId: "terminal_1" }, launchPath,
+  }), /Verified retained pane terminal_4 could not close: close denied/);
+  assert.deepEqual(h.calls, [
+    ["action", "list-panes", "--json", "--all"],
+    ["action", "close-pane", "--pane-id", "terminal_4"],
     ["action", "list-panes", "--json", "--all"],
   ]);
 });

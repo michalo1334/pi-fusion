@@ -10,6 +10,7 @@ ambiguity, the final review, the commit.
 
 - The sidekick reads `AGENTS.md`.
 - Use `follow_up` before Pi restarts. A `task_id` does not survive a restart.
+- A failed sidekick pane remains available for inspection. A valid `follow_up` opens a new pane and removes the prior pane only when Fusion verifies its terminal ID and saved launch path; do not close panes manually by an assumed ID.
 
 ## Select the Fusion default
 

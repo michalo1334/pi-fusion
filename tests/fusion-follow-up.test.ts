@@ -218,6 +218,41 @@ test("FUSION-CMD-07: persistence failure leaves runtime override unchanged", asy
   assert.match(first.details.taskId, /^[0-9a-f-]+$/);
  });
 
+test("FP-17 Unit: WHEN a failed run is followed up, THEN the runner receives only its retained pane and launch proof", async () => {
+  const launches: any[] = [];
+  const oldSurface = { paneId: "terminal_9", parentPaneId: "terminal_1" };
+  const oldLaunchPath = "/private/old/launch.mjs";
+  const harness = makeHarness({ run: async input => {
+    launches.push(input);
+    const run = result(input, launches.length === 1 ? "error" : "ok");
+    return launches.length === 1 ? { ...run, surface: oldSurface, artifacts: { launchPath: oldLaunchPath } as any } : run;
+  } });
+  const first = await call(harness.tools.get("delegate"), { brief: "fail but preserve session" }, harness.context);
+  await call(harness.tools.get("follow_up"), { task_id: first.details.taskId, message: "retry" }, harness.context);
+  assert.deepEqual(launches[1].retainedFailureSurface, { surface: oldSurface, launchPath: oldLaunchPath });
+});
+
+test("FP-17 Unit: WHEN retained-pane closure rejects a follow-up, THEN a later follow-up receives the same old ownership proof", async () => {
+  const launches: any[] = [];
+  const oldSurface = { paneId: "terminal_9", parentPaneId: "terminal_1" };
+  const oldLaunchPath = "/private/old/launch.mjs";
+  const harness = makeHarness({ run: async input => {
+    launches.push(input);
+    if (launches.length === 1) {
+      return { ...result(input, "error"), surface: oldSurface, artifacts: { launchPath: oldLaunchPath } as any };
+    }
+    throw new Error("Verified retained pane terminal_9 could not close: close denied");
+  } });
+  const first = await call(harness.tools.get("delegate"), { brief: "fail but preserve session" }, harness.context);
+  const followUp = harness.tools.get("follow_up");
+  await assert.rejects(() => call(followUp, { task_id: first.details.taskId, message: "retry closure" }, harness.context), /could not close/);
+  await assert.rejects(() => call(followUp, { task_id: first.details.taskId, message: "retry closure again" }, harness.context), /could not close/);
+  assert.deepEqual(launches.slice(1).map(launch => launch.retainedFailureSurface), [
+    { surface: oldSurface, launchPath: oldLaunchPath },
+    { surface: oldSurface, launchPath: oldLaunchPath },
+  ]);
+});
+
 test("LINEAGE-04 Unit: IF the lead session is ephemeral, THEN delegate SHALL reject before child allocation", async () => {
   let launched = false;
   const harness = makeHarness({ run: async input => { launched = true; return result(input); } });

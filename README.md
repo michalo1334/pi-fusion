@@ -57,14 +57,14 @@ The tool blocks until the child settles or fails. It does not return an early ac
 
 Task IDs and the task map exist only in the current parent Pi process and extension generation. A Pi restart or `/reload` invalidates old task IDs. Fusion does not reconstruct tasks after a restart. A follow-up also requires an intact saved session and cursor. A failed run can accept a follow-up only when Fusion reports that the session evidence remains valid and cleanup is complete.
 
-A task accepts only one active run at a time. A second follow-up for the same task returns a busy error. Separate tasks use the process-wide placement lock so concurrent pane creation does not race.
+A task accepts only one active run at a time. A second follow-up for the same task returns a busy error. Separate tasks use the process-wide placement lock so concurrent pane creation does not race. Before a valid follow-up opens its new pane, Fusion checks whether the prior failed or aborted pane still has both the saved terminal ID and the exact prior `launch.mjs` path in Zellij command metadata. It closes only that proven pane. A missing pane, reused ID, plugin collision, or command mismatch is left alone and the new pane still opens.
 
 ## Pane cleanup and cancellation
 
 | Run state | Pane and session behavior |
 | --- | --- |
 | Success | Fusion closes the child pane after it reads the report. The session and run artifacts remain. |
-| Provider, tool, policy, startup, or session error | Fusion keeps the pane and artifacts for inspection. |
+| Provider, tool, policy, startup, or session error | Fusion keeps the pane and artifacts for inspection. A valid follow-up later removes it only after command-path ownership verification. |
 | Timeout, parent cancellation, or user-closed pane | Fusion stops waiting, tries the owned child stop sequence, and keeps the inspection pane when it still exists. |
 | Parent `/reload` or shutdown | Fusion cancels active children, waits for bounded cleanup, and does not close inspection panes. |
 

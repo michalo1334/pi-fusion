@@ -39,6 +39,8 @@ export interface RunArtifacts {
   exitPath: string;
   runtimeErrorPath: string;
   cancelPath: string;
+  /** Exact wrapper path used to prove ownership of a retained Zellij pane. */
+  launchPath: string;
 }
 
 export interface ProcessIdentity {
@@ -252,7 +254,7 @@ export async function pollRun(control: RunControl): Promise<PollOutcome> {
 function assertArtifactPaths(artifacts: RunArtifacts): void {
   const runDir = path.resolve(artifacts.runDir);
   if (fs.existsSync(runDir) && fs.lstatSync(runDir).isSymbolicLink()) throw new Error("Run artifact directory must not be a symlink");
-  for (const file of [artifacts.promptPath, artifacts.systemPromptPath, artifacts.pidPath, artifacts.exitPath, artifacts.runtimeErrorPath, artifacts.cancelPath]) {
+  for (const file of [artifacts.promptPath, artifacts.systemPromptPath, artifacts.pidPath, artifacts.exitPath, artifacts.runtimeErrorPath, artifacts.cancelPath, artifacts.launchPath]) {
     const resolved = path.resolve(file);
     if (resolved !== runDir && !resolved.startsWith(`${runDir}${path.sep}`)) throw new Error("Run artifact path escapes its run directory");
   }
@@ -261,7 +263,7 @@ function assertArtifactPaths(artifacts: RunArtifacts): void {
 export function createLaunchWrapper(spec: ChildLaunchSpec, artifacts: RunArtifacts): string {
   assertArtifactPaths(artifacts);
   const launch = createLaunchSpec(spec);
-  const wrapper = path.join(artifacts.runDir, "launch.mjs");
+  const wrapper = artifacts.launchPath;
   const source = `import { spawn } from "node:child_process";
 import { writeFileSync, renameSync, readFileSync } from "node:fs";
 const runId = ${JSON.stringify(spec.runId)};
@@ -431,6 +433,7 @@ export function allocateRunArtifacts(root: string, taskId: string, runId: string
     exitPath: path.join(runDir, "exit.json"),
     runtimeErrorPath: path.join(runDir, "runtime-error.json"),
     cancelPath: path.join(runDir, "cancel"),
+    launchPath: path.join(runDir, "launch.mjs"),
   };
   assertArtifactPaths(artifacts);
   return artifacts;

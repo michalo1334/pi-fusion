@@ -127,8 +127,20 @@ export class SurfaceCreationError extends Error {
   }
 }
 
+export interface RetainedSurfaceCloseInput {
+  surface: ZellijSurface;
+  /** Exact per-run launch.mjs path recorded before the pane was retained. */
+  launchPath: string;
+  /** Prevent a close if cancellation becomes observable during the ownership query. */
+  isCancelled?: () => boolean;
+}
+
+export type RetainedSurfaceCloseResult = "closed" | "not-found-or-unowned" | "cancelled";
+
 export interface ZellijOperations {
   createSurface(input: CreateSurfaceInput): Promise<ZellijSurface>;
+  /** Close only a terminal pane whose current command proves it is the retained run. Optional for legacy test seams. */
+  closeRetainedSurface?(input: RetainedSurfaceCloseInput): Promise<RetainedSurfaceCloseResult>;
   sendCommand(surface: ZellijSurface, scriptPath: string): Promise<void>;
   interrupt(surface: ZellijSurface): Promise<void>;
   close(surface: ZellijSurface): Promise<void>;
@@ -167,6 +179,9 @@ interface PaneInfo {
   tab_id: number;
   pane_rows?: number;
   pane_columns?: number;
+  /** Zellij 0.45.1 terminal metadata used only for retained-pane ownership. */
+  pane_command?: string | null;
+  terminal_command?: string | null;
 }
 
 function parsePanes(stdout: string): PaneInfo[] {
@@ -179,13 +194,33 @@ function parsePanes(stdout: string): PaneInfo[] {
       && typeof value.is_plugin === "boolean"
       && typeof value.is_focused === "boolean"
       && typeof value.exited === "boolean"
-      && typeof value.tab_id === "number";
+      && typeof value.tab_id === "number"
+      && (value.pane_command === undefined || value.pane_command === null || typeof value.pane_command === "string")
+      && (value.terminal_command === undefined || value.terminal_command === null || typeof value.terminal_command === "string");
   });
 }
 
 function paneIdFromInfo(pane: PaneInfo): string | undefined {
   if (pane.is_plugin) return undefined;
   return `terminal_${pane.id}`;
+}
+
+function commandContainsLaunchPath(command: string | null | undefined, launchPath: string): boolean {
+  if (!command) return false;
+  let index = command.indexOf(launchPath);
+  while (index >= 0) {
+    const before = command[index - 1];
+    const after = command[index + launchPath.length];
+    if ((!before || /[\s'"[,(=]/.test(before)) && (!after || /[\s'"\],)]/.test(after))) return true;
+    index = command.indexOf(launchPath, index + launchPath.length);
+  }
+  return false;
+}
+
+function isOwnedRetainedPane(pane: PaneInfo | undefined, surface: ZellijSurface, launchPath: string): boolean {
+  if (!pane || pane.is_plugin || pane.exited || paneIdFromInfo(pane) !== surface.paneId) return false;
+  return commandContainsLaunchPath(pane.pane_command, launchPath)
+    || commandContainsLaunchPath(pane.terminal_command, launchPath);
 }
 
 /** Zellij CLI boundary. Every operation uses an explicit terminal pane ID. */
@@ -327,6 +362,26 @@ export class ZellijController implements ZellijOperations {
       const parent = panes.find(pane => !pane.is_plugin && paneIdFromInfo(pane) === parentPaneId);
       if (parent?.is_focused) return;
       throw error;
+    }
+  }
+
+  async closeRetainedSurface(input: RetainedSurfaceCloseInput): Promise<RetainedSurfaceCloseResult> {
+    this.assertSurface(input.surface);
+    if (!input.launchPath) throw new Error("A retained pane requires its exact launch path");
+    const panes = await this.listPanes();
+    const owned = panes.find(pane => isOwnedRetainedPane(pane, input.surface, input.launchPath));
+    if (!owned) return "not-found-or-unowned";
+    if (input.isCancelled?.()) return "cancelled";
+    try {
+      await this.execute("zellij", actionArgs("close-pane", "--pane-id", input.surface.paneId));
+      return "closed";
+    } catch (error) {
+      const after = await this.listPanes();
+      const stillOwned = after.find(pane => isOwnedRetainedPane(pane, input.surface, input.launchPath));
+      if (stillOwned) {
+        throw new Error(`Verified retained pane ${input.surface.paneId} could not close: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      return "not-found-or-unowned";
     }
   }
 

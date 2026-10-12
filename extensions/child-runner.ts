@@ -88,8 +88,10 @@ const FALLBACK_REPORT = "(sidekick produced no report)";
 
 export function resolveParentPaneId(env: NodeJS.ProcessEnv = process.env): string | undefined {
   const value = env.ZELLIJ_PANE_ID?.trim();
-  if (!value || !/^\d+$/.test(value) || Number(value) <= 0) return undefined;
-  return `terminal_${value}`;
+  if (!value || !/^\d+$/.test(value)) return undefined;
+  const numericId = Number(value);
+  if (!Number.isSafeInteger(numericId) || numericId < 0) return undefined;
+  return `terminal_${numericId}`;
 }
 
 export function zellijAvailability(env: NodeJS.ProcessEnv, hasBinary: boolean): Detection {

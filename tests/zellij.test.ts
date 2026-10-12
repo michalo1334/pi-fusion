@@ -1,8 +1,25 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { resolveParentPaneId } from "../extensions/child-runner.ts";
 import { choosePlacement, detectZellij, hasZellijExecutable, withPlacementLock } from "../extensions/zellij.ts";
 
 const env = { ZELLIJ: "0" };
+
+test("FP09-06 Unit: WHEN ZELLIJ_PANE_ID is zero, THE resolver SHALL return terminal_0", () => {
+  assert.equal(resolveParentPaneId({ ZELLIJ_PANE_ID: "0" }), "terminal_0");
+});
+
+test("FP09-06 Unit: WHEN ZELLIJ_PANE_ID is a positive safe integer, THE resolver SHALL return its terminal ID", () => {
+  assert.equal(resolveParentPaneId({ ZELLIJ_PANE_ID: "42" }), "terminal_42");
+  assert.equal(resolveParentPaneId({ ZELLIJ_PANE_ID: "0007" }), "terminal_7");
+  assert.equal(resolveParentPaneId({ ZELLIJ_PANE_ID: String(Number.MAX_SAFE_INTEGER) }), `terminal_${Number.MAX_SAFE_INTEGER}`);
+});
+
+test("FP09-06 Unit: WHEN ZELLIJ_PANE_ID is malformed, negative, fractional, or unsafe, THE resolver SHALL reject it", () => {
+  for (const value of ["", "abc", "1x", "-1", "1.5", "1e2", String(Number.MAX_SAFE_INTEGER + 1), "999999999999999999999999999999"]) {
+    assert.equal(resolveParentPaneId({ ZELLIJ_PANE_ID: value }), undefined, value);
+  }
+});
 
 test("FP-02 Unit: WHEN Zellij marker and executable exist, detection SHALL be available", () => {
   assert.equal(detectZellij(env, true).available, true);

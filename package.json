@@ -39,6 +39,7 @@
   },
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "node --test tests/*.test.ts"
+    "test": "node --test tests/*.test.ts",
+    "test:real": "node --test --test-concurrency=1 tests/integration/*.test.ts"
   }
 }

@@ -198,6 +198,7 @@ export async function pollRun(control: RunControl): Promise<PollOutcome> {
   const flushGrace = Math.max(0, control.flushGraceMs ?? 250);
   let disappearanceAt: number | undefined;
   let disappearanceReason: "gone" | "stale-identity" = "gone";
+  let paneGoneAt: number | undefined;
   while (true) {
     if (control.signal?.aborted) return { kind: "aborted" };
     const record = readExit(control.exitPath, control.runId);
@@ -206,7 +207,16 @@ export async function pollRun(control: RunControl): Promise<PollOutcome> {
 
     if (control.isPaneAlive) {
       try {
-        if (!(await control.isPaneAlive())) return { kind: "pane-lost" };
+        if (!(await control.isPaneAlive())) {
+          // Zellij can remove a terminal pane as soon as its wrapper exits.
+          // Allow the wrapper to publish its atomic exit sidecar first. A pane
+          // with no PID record is still an immediate surface-loss failure.
+          if (!fs.existsSync(control.pidPath)) return { kind: "pane-lost" };
+          paneGoneAt ??= Date.now();
+          if (Date.now() - paneGoneAt >= flushGrace) return { kind: "pane-lost" };
+        } else {
+          paneGoneAt = undefined;
+        }
       } catch (error) {
         return { kind: "query-error", error: error instanceof Error ? error : new Error(String(error)) };
       }
@@ -263,8 +273,8 @@ let finalized = false;
 let stopRequested = false;
 let child;
 let launchError;
-const finish = (code, spawnError) => { if (finalized) return; finalized = true; let runtimeError; try { const value = JSON.parse(readFileSync(errorPath, "utf8")); if (value.runId === runId && typeof value.error === "string" && value.error.trim()) runtimeError = value.error.trim(); } catch {} const failure = spawnError || launchError; const failed = runtimeError !== undefined; const exitCode = failed ? 78 : (launchError && !spawnError ? 78 : code); atomic(exitPath, { runId, exitCode, finishedAt: new Date().toISOString(), ...(failure ? { error: failure } : {}), ...(failed ? { error: runtimeError, policyFailure: true } : {}) }); process.exitCode = exitCode === null ? 1 : exitCode; if (exitCode !== 0 && process.env.PI_FUSION_HOLD_FAILURE === "1") { process.stdin.resume(); setInterval(() => {}, 1000); } };
-const handleTerminalSignal = (signal) => { if (finalized) return; if (!child || child.killed) { stopRequested = true; return; } try { child.kill(signal); } catch {} };
+const finish = (code, spawnError) => { if (finalized) return; finalized = true; let runtimeError; try { const value = JSON.parse(readFileSync(errorPath, "utf8")); if (value.runId === runId && typeof value.error === "string" && value.error.trim()) runtimeError = value.error.trim(); } catch {} const failure = spawnError || launchError; const failed = runtimeError !== undefined; const exitCode = failed ? 78 : (launchError && !spawnError ? 78 : code); atomic(exitPath, { runId, exitCode, finishedAt: new Date().toISOString(), ...(failure ? { error: failure } : {}), ...(failed ? { error: runtimeError, policyFailure: true } : {}) }); process.exitCode = exitCode === null ? 1 : exitCode; if (exitCode !== 0 && explicitEnv.PI_FUSION_HOLD_FAILURE === "1") { process.stdin.resume(); setInterval(() => {}, 1000); } };
+const handleTerminalSignal = (signal) => { if (finalized) { if (explicitEnv.PI_FUSION_HOLD_FAILURE === "1") process.exit(signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 1); return; } if (!child || child.killed) { stopRequested = true; return; } try { child.kill(signal); } catch {} };
 process.on("SIGINT", () => handleTerminalSignal("SIGINT"));
 process.on("SIGTERM", () => handleTerminalSignal("SIGTERM"));
 process.on("SIGHUP", () => handleTerminalSignal("SIGHUP"));

@@ -314,7 +314,18 @@ export class ZellijController implements ZellijOperations {
   }
 
   private async restoreFocus(parentPaneId: string): Promise<void> {
-    await this.execute("zellij", actionArgs("focus-pane-id", parentPaneId));
+    try {
+      await this.execute("zellij", actionArgs("focus-pane-id", parentPaneId));
+    } catch (error) {
+      // Zellij returns an error when the requested terminal already has focus.
+      // Confirm that state before treating the action as a real failure.
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.toLowerCase().includes("already focused")) throw error;
+      const panes = await this.listPanes();
+      const parent = panes.find(pane => !pane.is_plugin && paneIdFromInfo(pane) === parentPaneId);
+      if (parent?.is_focused) return;
+      throw error;
+    }
   }
 
   async sendCommand(surface: ZellijSurface, scriptPath: string): Promise<void> {

@@ -13,6 +13,7 @@ import {
   CONFIG_DIR_NAME,
   type ExtensionAPI,
   type ExtensionContext,
+  ModelSelectorComponent,
   getAgentDir,
   keyHint,
 } from "@earendil-works/pi-coding-agent";
@@ -307,7 +308,7 @@ function readConfig(cwd: string, modelOverride?: string): FusionConfig {
 function resolveSidekickModel(
   ctx: ExtensionContext,
   value: string,
-): { model: unknown; thinkingLevel: string } | { error: string } {
+): { model: ReturnType<ExtensionContext["modelRegistry"]["find"]>; thinkingLevel: string } | { error: string } {
   const spec = value.trim();
   const slash = spec.indexOf("/");
   if (slash <= 0 || slash === spec.length - 1) return { error: "Use provider/model[:thinking]" };
@@ -327,24 +328,15 @@ function resolveSidekickModel(
   return { model, thinkingLevel };
 }
 
-function availableModelSpecs(ctx: ExtensionContext): string[] {
-  return ctx.modelRegistry.getAvailable().flatMap((model) => {
-    if (typeof model.provider !== "string" || !model.provider) return [];
-    if (typeof model.id !== "string" || !model.id) return [];
-    return [`${model.provider}/${model.id}`];
-  }).sort((left, right) => left.localeCompare(right));
-}
-
-async function selectSidekickModel(ctx: ExtensionContext, currentModel: string): Promise<string | undefined> {
-  const specs = availableModelSpecs(ctx);
-  if (specs.length === 0) {
-    ctx.ui.notify("No configured models are available for the sidekick.", "error");
-    return undefined;
-  }
-  const providers = [...new Set(specs.map((spec) => spec.slice(0, spec.indexOf("/"))))];
-  const provider = await ctx.ui.select(`Sidekick provider (current: ${currentModel})`, providers);
-  if (!provider) return undefined;
-  return ctx.ui.select(`Sidekick model (${provider})`, specs.filter((spec) => spec.startsWith(`${provider}/`)));
+function selectorRuntime(ctx: ExtensionContext): ConstructorParameters<typeof ModelSelectorComponent>[2] {
+  const runtime = {
+    getAvailableSnapshot: () => ctx.modelRegistry.getAvailable(),
+    getModel: (provider: string, id: string) => ctx.modelRegistry.find(provider, id),
+    getError: () => ctx.modelRegistry.getError(),
+    refresh: (options?: { signal?: AbortSignal }) => ctx.modelRegistry.refresh(options),
+  };
+  // Pi exposes ModelRegistry to extensions, while the public selector expects ModelRuntime.
+  return runtime as unknown as ConstructorParameters<typeof ModelSelectorComponent>[2];
 }
 
 async function selectThinking(ctx: ExtensionContext, current: string): Promise<string | undefined> {
@@ -554,11 +546,27 @@ export function createFusionExtension(pi: ExtensionAPI, dependencies: FusionRunt
           return;
         }
         if (!ctx.hasUI) { ctx.ui.notify(`sidekick model: ${currentNormalized}`, "info"); return; }
-        const model = await selectSidekickModel(ctx, currentNormalized);
-        if (!model) return;
+        if (ctx.mode !== "tui") {
+          ctx.ui.notify("The no-argument model picker requires TUI mode. Pass provider/model[:thinking] directly in RPC or other non-TUI modes.", "error");
+          return;
+        }
+        if (typeof ctx.ui.custom !== "function") { ctx.ui.notify("Model selector is unavailable in this Pi UI.", "error"); return; }
+        const selected = await ctx.ui.custom((tui, _theme, _keys, done) => {
+          const currentModel = resolveSidekickModel(ctx, currentNormalized!);
+          const selector = new ModelSelectorComponent(
+            tui,
+            "error" in currentModel ? undefined : currentModel.model,
+            selectorRuntime(ctx),
+            ctx.scopedModels,
+            model => done(`${model.provider}/${model.id}`),
+            () => done(undefined),
+          );
+          return selector;
+        });
+        if (!selected) return;
         const thinking = await selectThinking(ctx, currentNormalized.slice(currentNormalized.lastIndexOf(":") + 1));
         if (!thinking) return;
-        candidate = `${model}:${thinking}`;
+        candidate = `${selected}:${thinking}`;
       } else {
         try {
           const normalized = normalizeFusionModel(arg);

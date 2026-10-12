@@ -130,7 +130,8 @@ Use this command:
 
 The command uses the lead Pi model registry. The selected model must be available there.
 
-- With no argument, the command opens the registered model selector and then a thinking-level selector.
+- With no argument in TUI mode, the command opens Pi’s model selector and then a thinking-level selector. RPC and
+  other non-TUI users must pass `provider/model[:thinking]` explicitly.
 - With `provider/model`, the command validates the model and prompts for the thinking level.
 - With `provider/model:thinking`, the command validates and applies both values directly.
 

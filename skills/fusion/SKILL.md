@@ -15,7 +15,8 @@ ambiguity, the final review, the commit.
 
 Use `/fusion-model [provider/model[:thinking]]` to change the default for later child launches.
 
-- With no argument, open the registered model selector, then the thinking-level selector.
+- With no argument in TUI mode, open Pi’s model selector, then the thinking-level selector. In RPC or other non-TUI
+  modes, pass `provider/model[:thinking]` explicitly.
 - With `provider/model`, validate the model and prompt for the thinking level.
 - With `provider/model:thinking`, validate and apply both values directly.
 

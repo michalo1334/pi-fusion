@@ -3,11 +3,12 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { SessionManager, initTheme } from "@earendil-works/pi-coding-agent";
+initTheme("dark");
 import { createFusionExtension, type FusionRuntimeDependencies } from "../extensions/fusion.ts";
 import type { ChildRunResult } from "../extensions/child-runner.ts";
 
-function makeHarness(options: { run?: (input: any) => Promise<ChildRunResult>; root?: string; check?: FusionRuntimeDependencies["checkZellij"]; ui?: any; hasUI?: boolean; models?: Array<{ provider: string; id: string }> } = {}) {
+function makeHarness(options: { run?: (input: any) => Promise<ChildRunResult>; root?: string; check?: FusionRuntimeDependencies["checkZellij"]; ui?: any; hasUI?: boolean; mode?: string; models?: Array<{ provider: string; id: string }> } = {}) {
   const root = options.root ?? fs.mkdtempSync(path.join(os.tmpdir(), "fp08-fusion-"));
   fs.mkdirSync(path.join(root, ".pi"), { recursive: true });
   fs.writeFileSync(path.join(root, ".pi", "settings.json"), JSON.stringify({ fusion: {
@@ -30,10 +31,15 @@ function makeHarness(options: { run?: (input: any) => Promise<ChildRunResult>; r
   const context = {
     cwd: root,
     hasUI: options.hasUI ?? false,
+    mode: options.mode ?? "tui",
     ui: options.ui ?? { notify: () => {} },
+    model: models[0],
+    scopedModels: [],
     modelRegistry: {
       find: (provider: string, id: string) => models.find(model => model.provider === provider && model.id === id),
       getAvailable: () => models,
+      getError: () => undefined,
+      refresh: async () => ({ aborted: false, errors: new Map() }),
     },
     sessionManager: { getSessionDir: () => sessionDir, getSessionId: () => "lead-session", getSessionFile: () => leadFile },
   } as any;
@@ -58,14 +64,19 @@ function result(input: any, status: ChildRunResult["status"] = "ok", valid = tru
 const call = (tool: any, params: any, context: any, signal = new AbortController().signal, onUpdate?: (update: any) => void) =>
   tool.execute("call", params, signal, onUpdate, context);
 
-function commandHarness(options: { select?: (...args: any[]) => Promise<string | undefined>; notify?: (...args: any[]) => void } = {}) {
-  const selections: any[] = [];
+function commandHarness(options: { custom?: (factory: any) => Promise<string | undefined>; select?: (...args: any[]) => Promise<string | undefined>; notify?: (...args: any[]) => void; mode?: string } = {}) {
   const notifications: any[] = [];
-  const harness = makeHarness({ hasUI: true, ui: {
-    select: async (...args: any[]) => { selections.push(args); return options.select ? options.select(...args) : undefined; },
+  const selectors: any[] = [];
+  const harness = makeHarness({ hasUI: true, mode: options.mode, ui: {
+    custom: async (factory: any) => {
+      selectors.push(factory);
+      if (options.custom) return options.custom(factory);
+      return undefined;
+    },
+    select: async (...args: any[]) => options.select ? options.select(...args) : undefined,
     notify: (...args: any[]) => { notifications.push(args); options.notify?.(...args); },
   } });
-  return { ...harness, selections, notifications, command: harness.commands.get("fusion-model") };
+  return { ...harness, selectors, notifications, command: harness.commands.get("fusion-model") };
 }
 
 test("FUSION-CMD-01: registers fusion-model", () => {
@@ -89,22 +100,74 @@ test("FUSION-CMD-02b: complete replacement repairs malformed saved thinking", as
 });
 
 test("FUSION-CMD-03: prompts for thinking when model is partial", async () => {
-  const h = commandHarness({ select: async () => "high" });
+  let calls = 0;
+  let title = "";
+  const h = commandHarness({ select: async (prompt: string) => { calls++; title = prompt; return "high"; } });
   await h.command.handler("offline/fixture", h.context);
-  assert.equal(h.selections.length, 1);
+  assert.equal(calls, 1);
+  assert.match(title, /thinking/i);
   assert.match(JSON.parse(fs.readFileSync(path.join(h.root, ".pi/settings.json"), "utf8")).fusion.sidekickModel, /:high$/);
 });
 
-test("FUSION-CMD-04: no argument prompts for model then thinking", async () => {
-  let n = 0;
-  const h = commandHarness({ select: async () => (++n === 1 ? "offline" : n === 2 ? "offline/fixture" : "low") });
+test("FUSION-CMD-04: non-TUI no-argument command requires an explicit model", async () => {
+  const h = commandHarness({ mode: "rpc", custom: async () => { throw new Error("custom must not run"); } });
+  const before = fs.readFileSync(path.join(h.root, ".pi/settings.json"), "utf8");
   await h.command.handler("", h.context);
-  assert.equal(h.selections.length, 3);
+  assert.match(h.notifications.at(-1)?.[0] ?? "", /TUI|provider\/model/i);
+  assert.equal(fs.readFileSync(path.join(h.root, ".pi/settings.json"), "utf8"), before);
+});
+
+test("FUSION-CMD-04a: production command uses Pi selector runtime, scope, and public selection input", async () => {
+  const calls = { available: 0, find: 0, error: 0, refresh: 0, refreshSignal: false };
+  const h = commandHarness({ custom: async (factory) => {
+    let doneValue: unknown;
+    const component = factory({ requestRender() {} }, {}, {}, (value: unknown) => { doneValue = value; });
+    assert.equal(component.constructor.name, "ModelSelectorComponent");
+    assert.equal((component as any).currentModel.provider, "offline");
+    assert.deepEqual(h.context.scopedModels, (component as any).scopedModels);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    component.handleInput("\r");
+    assert.equal(doneValue, "offline/fixture");
+    return doneValue as string;
+  }, select: async () => "low" });
+  const model = h.context.model;
+  h.context.scopedModels = [{ model }];
+  h.context.modelRegistry = {
+    getAvailable: () => { calls.available++; return [model]; },
+    find: (provider: string, id: string) => { calls.find++; return provider === model.provider && id === model.id ? model : undefined; },
+    getError: () => { calls.error++; return undefined; },
+    refresh: async (options?: { signal?: AbortSignal }) => {
+      calls.refresh++;
+      calls.refreshSignal = options?.signal instanceof AbortSignal;
+      return { aborted: false, errors: new Map() };
+    },
+  };
+  await h.command.handler("", h.context);
+  assert.ok(calls.available >= 2);
+  assert.ok(calls.find >= 2);
+  assert.equal(calls.error, 1);
+  assert.equal(calls.refresh, 1);
+  assert.equal(calls.refreshSignal, true);
   assert.equal(JSON.parse(fs.readFileSync(path.join(h.root, ".pi/settings.json"), "utf8")).fusion.sidekickModel, "offline/fixture:low");
 });
 
-test("FUSION-CMD-05: selector cancellation does not write", async () => {
-  const h = commandHarness();
+test("FUSION-CMD-05: Pi model selector cancellation does not write", async () => {
+  const h = commandHarness({ custom: async (factory) => {
+    let doneCalled = false;
+    let doneValue: unknown = "not-called";
+    const component = factory({ requestRender() {} }, {}, {}, (value: unknown) => { doneCalled = true; doneValue = value; });
+    component.handleInput("\u001b");
+    assert.equal(doneCalled, true);
+    assert.equal(doneValue, undefined);
+    return doneValue as undefined;
+  } });
+  const before = fs.readFileSync(path.join(h.root, ".pi/settings.json"), "utf8");
+  await h.command.handler("", h.context);
+  assert.equal(fs.readFileSync(path.join(h.root, ".pi/settings.json"), "utf8"), before);
+});
+
+test("FUSION-CMD-05a: thinking cancellation does not write", async () => {
+  const h = commandHarness({ custom: async () => "offline/fixture", select: async () => undefined });
   const before = fs.readFileSync(path.join(h.root, ".pi/settings.json"), "utf8");
   await h.command.handler("", h.context);
   assert.equal(fs.readFileSync(path.join(h.root, ".pi/settings.json"), "utf8"), before);

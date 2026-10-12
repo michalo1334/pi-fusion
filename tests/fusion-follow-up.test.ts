@@ -78,6 +78,16 @@ test("FUSION-CMD-02: persists complete argument", async () => {
   assert.equal(JSON.parse(fs.readFileSync(path.join(h.root, ".pi/settings.json"), "utf8")).fusion.sidekickModel, "offline/fixture:medium");
 });
 
+test("FUSION-CMD-02b: complete replacement repairs malformed saved thinking", async () => {
+  const h = commandHarness();
+  const settings = path.join(h.root, ".pi", "settings.json");
+  const parsed = JSON.parse(fs.readFileSync(settings, "utf8"));
+  parsed.fusion.sidekickModel = "offline/fixture:invalid";
+  fs.writeFileSync(settings, JSON.stringify(parsed));
+  await h.command.handler("offline/fixture:medium", h.context);
+  assert.equal(JSON.parse(fs.readFileSync(settings, "utf8")).fusion.sidekickModel, "offline/fixture:medium");
+});
+
 test("FUSION-CMD-03: prompts for thinking when model is partial", async () => {
   const h = commandHarness({ select: async () => "high" });
   await h.command.handler("offline/fixture", h.context);
@@ -98,6 +108,18 @@ test("FUSION-CMD-05: selector cancellation does not write", async () => {
   const before = fs.readFileSync(path.join(h.root, ".pi/settings.json"), "utf8");
   await h.command.handler("", h.context);
   assert.equal(fs.readFileSync(path.join(h.root, ".pi/settings.json"), "utf8"), before);
+});
+
+test("FUSION-CMD-05b: selector reports malformed saved model without writing", async () => {
+  const h = commandHarness();
+  const settings = path.join(h.root, ".pi", "settings.json");
+  const parsed = JSON.parse(fs.readFileSync(settings, "utf8"));
+  parsed.fusion.sidekickModel = "offline/fixture:invalid";
+  fs.writeFileSync(settings, JSON.stringify(parsed));
+  const before = fs.readFileSync(settings, "utf8");
+  await h.command.handler("", h.context);
+  assert.match(h.notifications.at(-1)?.[0] ?? "", /invalid|repair|complete/i);
+  assert.equal(fs.readFileSync(settings, "utf8"), before);
 });
 
 test("FUSION-CMD-06: invalid input does not write", async () => {

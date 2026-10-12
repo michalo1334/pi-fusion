@@ -545,9 +545,14 @@ export function createFusionExtension(pi: ExtensionAPI, dependencies: FusionRunt
     handler: async (args, ctx) => {
       const arg = args?.trim();
       const current = readConfig(ctx.cwd, modelOverride).sidekickModel;
-      const currentNormalized = normalizeFusionModel(current);
+      let currentNormalized: string | undefined;
       let candidate: string | undefined;
       if (!arg) {
+        try { currentNormalized = normalizeFusionModel(current); }
+        catch (error) {
+          ctx.ui.notify(`Cannot use saved Fusion model "${current}": ${error instanceof Error ? error.message : String(error)}. Provide a complete provider/model[:thinking] value to repair it.`, "error");
+          return;
+        }
         if (!ctx.hasUI) { ctx.ui.notify(`sidekick model: ${currentNormalized}`, "info"); return; }
         const model = await selectSidekickModel(ctx, currentNormalized);
         if (!model) return;
@@ -562,6 +567,8 @@ export function createFusionExtension(pi: ExtensionAPI, dependencies: FusionRunt
           if ("error" in resolved) throw new Error(resolved.error);
           candidate = normalized;
           if (!arg.includes(":") && ctx.hasUI) {
+            try { currentNormalized ??= normalizeFusionModel(current); }
+            catch (error) { throw new Error(`Saved Fusion model is invalid (${error instanceof Error ? error.message : String(error)}); provide a complete provider/model:thinking value`); }
             const thinking = await selectThinking(ctx, currentNormalized.slice(currentNormalized.lastIndexOf(":") + 1));
             if (!thinking) return;
             candidate = `${normalized.slice(0, colon)}:${thinking}`;

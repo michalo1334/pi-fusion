@@ -650,7 +650,7 @@ export function createFusionExtension(pi: ExtensionAPI, dependencies: FusionRunt
       message: Type.String({ description: "Feedback or additional instructions for the sidekick" }),
     }),
     renderCall(args, theme, context) { return renderPromptCall(`follow_up ${args.task_id ?? ""}`, args.message, theme, context); },
-    async execute(_toolCallId, params, signal, onUpdate) {
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const task = tasks.get(params.task_id);
       if (!task) {
         const known = [...tasks.keys()].join(", ") || "none";
@@ -667,6 +667,14 @@ export function createFusionExtension(pi: ExtensionAPI, dependencies: FusionRunt
       if (!detection.available || !parentPaneId) {
         throw new Error(detection.setupHint + (parentPaneId ? "" : " ZELLIJ_PANE_ID is missing from the host Pi environment."));
       }
+      // Resolve defaults at follow-up launch time. The task's model remains
+      // diagnostic history only; it must not become a stale default source.
+      const cfg = readConfig(ctx.cwd, modelOverride);
+      const resolved = resolveSidekickModel(ctx, cfg.sidekickModel);
+      if ("error" in resolved) {
+        throw new Error(`pi-fusion: cannot resolve sidekick model "${cfg.sidekickModel}": ${resolved.error}`);
+      }
+      task.model = modelInput(resolved.model, resolved.thinkingLevel);
       let result: ChildRunResult;
       try {
         result = await runTask(task, params.message, parentPaneId, task.timeoutMs, signal, true);

@@ -7,7 +7,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { createFusionExtension, type FusionRuntimeDependencies } from "../extensions/fusion.ts";
 import type { ChildRunResult } from "../extensions/child-runner.ts";
 
-function makeHarness(options: { run?: (input: any) => Promise<ChildRunResult>; root?: string; check?: FusionRuntimeDependencies["checkZellij"]; ui?: any; hasUI?: boolean } = {}) {
+function makeHarness(options: { run?: (input: any) => Promise<ChildRunResult>; root?: string; check?: FusionRuntimeDependencies["checkZellij"]; ui?: any; hasUI?: boolean; models?: Array<{ provider: string; id: string }> } = {}) {
   const root = options.root ?? fs.mkdtempSync(path.join(os.tmpdir(), "fp08-fusion-"));
   fs.mkdirSync(path.join(root, ".pi"), { recursive: true });
   fs.writeFileSync(path.join(root, ".pi", "settings.json"), JSON.stringify({ fusion: {
@@ -21,7 +21,7 @@ function makeHarness(options: { run?: (input: any) => Promise<ChildRunResult>; r
     registerTool: (tool: any) => { tools.set(tool.name, tool); },
     on: (name: string, handler: (event: any, ctx?: any) => Promise<unknown> | unknown) => { events.set(name, handler); return () => events.delete(name); },
   } as any;
-  const model = { provider: "offline", id: "fixture" };
+  const models = options.models ?? [{ provider: "offline", id: "fixture" }];
   const sessionDir = path.join(root, "sessions");
   fs.mkdirSync(sessionDir, { recursive: true });
   const leadManager = SessionManager.create(root, sessionDir, { id: "lead-session" });
@@ -31,7 +31,10 @@ function makeHarness(options: { run?: (input: any) => Promise<ChildRunResult>; r
     cwd: root,
     hasUI: options.hasUI ?? false,
     ui: options.ui ?? { notify: () => {} },
-    modelRegistry: { find: () => model, getAvailable: () => [model] },
+    modelRegistry: {
+      find: (provider: string, id: string) => models.find(model => model.provider === provider && model.id === id),
+      getAvailable: () => models,
+    },
     sessionManager: { getSessionDir: () => sessionDir, getSessionId: () => "lead-session", getSessionFile: () => leadFile },
   } as any;
   const dependencies: FusionRuntimeDependencies = {
@@ -181,27 +184,42 @@ test("LINEAGE-08 Unit: WHEN delegate is aborted during Zellij detection, THEN it
   assert.equal(fs.existsSync(path.join(sessionDir, "artifacts")), false);
 });
 
-test("FP-08/Integration: WHEN follow-up runs, THE extension SHALL use the same session and selected policy with a new run", async () => {
+test("FP-08/Integration: WHEN /fusion-model changes after delegate, THE follow-up SHALL use the latest model and thinking without replacing the session", async () => {
   const calls: any[] = [];
-  const harness = makeHarness({ run: async input => { calls.push(input); return result(input); } });
+  const harness = makeHarness({
+    models: [
+      { provider: "offline", id: "fixture" },
+      { provider: "offline", id: "changed" },
+    ],
+    hasUI: true,
+    ui: { notify: () => {} },
+    run: async input => { calls.push(input); return result(input); },
+  });
   const delegate = harness.tools.get("delegate");
   const follow = harness.tools.get("follow_up");
   const first = await call(delegate, { brief: "brief" }, harness.context);
-  fs.writeFileSync(path.join(harness.root, ".pi", "settings.json"), JSON.stringify({ fusion: {
-    sidekickModel: "offline/changed:off", timeoutMinutes: 9, sidekickTools: ["bash"], sidekickExtensions: [],
-  } }));
+  await harness.commands.get("fusion-model").handler("offline/changed:medium", harness.context);
   const second = await call(follow, { task_id: first.details.taskId, message: "continue" }, harness.context);
-  assert.equal(calls.length, 2);
+  const later = await call(delegate, { brief: "new task" }, harness.context);
+  assert.equal(calls.length, 3);
+  assert.equal(calls[0].model.provider, "offline");
+  assert.equal(calls[0].model.id, "fixture");
+  assert.equal(calls[0].model.thinking, "high");
+  assert.equal(calls[1].model.provider, "offline");
+  assert.equal(calls[1].model.id, "changed");
+  assert.equal(calls[1].model.thinking, "medium");
+  assert.deepEqual(calls[1].model, calls[2].model);
   assert.equal(calls[0].sessionId, calls[1].sessionId);
   assert.equal(calls[0].sessionDir, calls[1].sessionDir);
   assert.equal(calls[0].cwd, calls[1].cwd);
-  assert.deepEqual(calls[0].model, calls[1].model);
   assert.deepEqual(calls[0].tools, calls[1].tools);
   assert.deepEqual(calls[0].extensions, calls[1].extensions);
   assert.equal(calls[0].timeoutMs, calls[1].timeoutMs);
   assert.equal(calls[1].requireExistingSession, true);
+  assert.equal(calls[2].requireExistingSession, false);
   assert.notEqual(first.details.costUsd, undefined);
   assert.notEqual(second.details.costUsd, undefined);
+  assert.notEqual(later.details.costUsd, undefined);
 });
 
 test("FP-08/Unit: WHILE a task run is active, THE extension SHALL reject same-task follow-up and allow a separate delegate", async () => {

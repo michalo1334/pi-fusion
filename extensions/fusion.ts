@@ -31,6 +31,7 @@ import {
 } from "./sidekick-policy.ts";
 import { SessionIntegrityError } from "./session-parser.ts";
 import { seedChildSessionFile } from "./session-lineage.ts";
+import { normalizeFusionModel, persistFusionModel } from "./fusion-settings.ts";
 
 const MAX_LOG_LINES = 30;
 const SHORT_REPORT_CHARS = 200;
@@ -346,6 +347,10 @@ async function selectSidekickModel(ctx: ExtensionContext, currentModel: string):
   return ctx.ui.select(`Sidekick model (${provider})`, specs.filter((spec) => spec.startsWith(`${provider}/`)));
 }
 
+async function selectThinking(ctx: ExtensionContext, current: string): Promise<string | undefined> {
+  return ctx.ui.select(`Sidekick thinking (current: ${current})`, [...THINKING_LEVELS]);
+}
+
 export function selectedSidekickTools(tools: string[], extensionIds: string[]): string[] {
   assertNoRecursiveFusionTools(tools);
   const invalid = tools.filter((tool) => !SUPPORTED_SIDEKICK_TOOLS.has(tool));
@@ -536,22 +541,44 @@ export function createFusionExtension(pi: ExtensionAPI, dependencies: FusionRunt
   };
 
   pi.registerCommand("fusion-model", {
-    description: "Select or set the sidekick model for this Pi process (provider/model[:thinking])",
+    description: "Select or set the sidekick model (provider/model[:thinking])",
     handler: async (args, ctx) => {
       const arg = args?.trim();
+      const current = readConfig(ctx.cwd, modelOverride).sidekickModel;
+      const currentNormalized = normalizeFusionModel(current);
+      let candidate: string | undefined;
       if (!arg) {
-        const currentModel = readConfig(ctx.cwd, modelOverride).sidekickModel;
-        if (!ctx.hasUI) { ctx.ui.notify(`sidekick model: ${currentModel}`, "info"); return; }
-        const selected = await selectSidekickModel(ctx, currentModel);
-        if (!selected) return;
-        modelOverride = selected;
-        ctx.ui.notify(`Sidekick model set to ${selected} for this Pi process`, "info");
-        return;
+        if (!ctx.hasUI) { ctx.ui.notify(`sidekick model: ${currentNormalized}`, "info"); return; }
+        const model = await selectSidekickModel(ctx, currentNormalized);
+        if (!model) return;
+        const thinking = await selectThinking(ctx, currentNormalized.slice(currentNormalized.lastIndexOf(":") + 1));
+        if (!thinking) return;
+        candidate = `${model}:${thinking}`;
+      } else {
+        try {
+          const normalized = normalizeFusionModel(arg);
+          const colon = normalized.lastIndexOf(":");
+          const resolved = resolveSidekickModel(ctx, normalized);
+          if ("error" in resolved) throw new Error(resolved.error);
+          candidate = normalized;
+          if (!arg.includes(":") && ctx.hasUI) {
+            const thinking = await selectThinking(ctx, currentNormalized.slice(currentNormalized.lastIndexOf(":") + 1));
+            if (!thinking) return;
+            candidate = `${normalized.slice(0, colon)}:${thinking}`;
+          }
+        } catch (error) {
+          ctx.ui.notify(`Cannot resolve "${arg}": ${error instanceof Error ? error.message : String(error)}`, "error");
+          return;
+        }
       }
-      const resolved = resolveSidekickModel(ctx, arg);
-      if ("error" in resolved) { ctx.ui.notify(`Cannot resolve "${arg}": ${resolved.error}`, "error"); return; }
-      modelOverride = arg;
-      ctx.ui.notify(`Sidekick model set to ${arg} for this session`, "info");
+      const normalized = normalizeFusionModel(candidate!);
+      const resolved = resolveSidekickModel(ctx, normalized);
+      if ("error" in resolved) { ctx.ui.notify(`Cannot resolve "${normalized}": ${resolved.error}`, "error"); return; }
+      const settingsFile = path.join(ctx.cwd, CONFIG_DIR_NAME, "settings.json");
+      try { persistFusionModel(settingsFile, normalized); }
+      catch (error) { ctx.ui.notify(`Cannot persist Fusion model: ${error instanceof Error ? error.message : String(error)}`, "error"); return; }
+      modelOverride = normalized;
+      ctx.ui.notify(`Sidekick model set to ${normalized}; saved to ${settingsFile}`, "info");
     },
   });
 

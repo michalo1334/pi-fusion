@@ -7,7 +7,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { createFusionExtension, type FusionRuntimeDependencies } from "../extensions/fusion.ts";
 import type { ChildRunResult } from "../extensions/child-runner.ts";
 
-function makeHarness(options: { run?: (input: any) => Promise<ChildRunResult>; root?: string; check?: FusionRuntimeDependencies["checkZellij"] } = {}) {
+function makeHarness(options: { run?: (input: any) => Promise<ChildRunResult>; root?: string; check?: FusionRuntimeDependencies["checkZellij"]; ui?: any; hasUI?: boolean } = {}) {
   const root = options.root ?? fs.mkdtempSync(path.join(os.tmpdir(), "fp08-fusion-"));
   fs.mkdirSync(path.join(root, ".pi"), { recursive: true });
   fs.writeFileSync(path.join(root, ".pi", "settings.json"), JSON.stringify({ fusion: {
@@ -15,8 +15,9 @@ function makeHarness(options: { run?: (input: any) => Promise<ChildRunResult>; r
   } }));
   const tools = new Map<string, any>();
   const events = new Map<string, (event: any, ctx?: any) => Promise<unknown> | unknown>();
+  const commands = new Map<string, any>();
   const pi = {
-    registerCommand: () => {},
+    registerCommand: (name: string, command: any) => { commands.set(name, command); },
     registerTool: (tool: any) => { tools.set(tool.name, tool); },
     on: (name: string, handler: (event: any, ctx?: any) => Promise<unknown> | unknown) => { events.set(name, handler); return () => events.delete(name); },
   } as any;
@@ -28,8 +29,8 @@ function makeHarness(options: { run?: (input: any) => Promise<ChildRunResult>; r
   fs.writeFileSync(leadFile, `${JSON.stringify(leadManager.getHeader())}\n`, { mode: 0o600 });
   const context = {
     cwd: root,
-    hasUI: false,
-    ui: { notify: () => {} },
+    hasUI: options.hasUI ?? false,
+    ui: options.ui ?? { notify: () => {} },
     modelRegistry: { find: () => model, getAvailable: () => [model] },
     sessionManager: { getSessionDir: () => sessionDir, getSessionId: () => "lead-session", getSessionFile: () => leadFile },
   } as any;
@@ -39,7 +40,7 @@ function makeHarness(options: { run?: (input: any) => Promise<ChildRunResult>; r
     resolveParentPaneId: () => "terminal_1",
   };
   createFusionExtension(pi, dependencies);
-  return { root, tools, events, context };
+  return { root, tools, events, commands, context };
 }
 
 function result(input: any, status: ChildRunResult["status"] = "ok", valid = true): ChildRunResult {
@@ -53,6 +54,68 @@ function result(input: any, status: ChildRunResult["status"] = "ok", valid = tru
 
 const call = (tool: any, params: any, context: any, signal = new AbortController().signal, onUpdate?: (update: any) => void) =>
   tool.execute("call", params, signal, onUpdate, context);
+
+function commandHarness(options: { select?: (...args: any[]) => Promise<string | undefined>; notify?: (...args: any[]) => void } = {}) {
+  const selections: any[] = [];
+  const notifications: any[] = [];
+  const harness = makeHarness({ hasUI: true, ui: {
+    select: async (...args: any[]) => { selections.push(args); return options.select ? options.select(...args) : undefined; },
+    notify: (...args: any[]) => { notifications.push(args); options.notify?.(...args); },
+  } });
+  return { ...harness, selections, notifications, command: harness.commands.get("fusion-model") };
+}
+
+test("FUSION-CMD-01: registers fusion-model", () => {
+  assert.ok(commandHarness().command);
+});
+
+test("FUSION-CMD-02: persists complete argument", async () => {
+  const h = commandHarness();
+  await h.command.handler("offline/fixture:medium", h.context);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(h.root, ".pi/settings.json"), "utf8")).fusion.sidekickModel, "offline/fixture:medium");
+});
+
+test("FUSION-CMD-03: prompts for thinking when model is partial", async () => {
+  const h = commandHarness({ select: async () => "high" });
+  await h.command.handler("offline/fixture", h.context);
+  assert.equal(h.selections.length, 1);
+  assert.match(JSON.parse(fs.readFileSync(path.join(h.root, ".pi/settings.json"), "utf8")).fusion.sidekickModel, /:high$/);
+});
+
+test("FUSION-CMD-04: no argument prompts for model then thinking", async () => {
+  let n = 0;
+  const h = commandHarness({ select: async () => (++n === 1 ? "offline" : n === 2 ? "offline/fixture" : "low") });
+  await h.command.handler("", h.context);
+  assert.equal(h.selections.length, 3);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(h.root, ".pi/settings.json"), "utf8")).fusion.sidekickModel, "offline/fixture:low");
+});
+
+test("FUSION-CMD-05: selector cancellation does not write", async () => {
+  const h = commandHarness();
+  const before = fs.readFileSync(path.join(h.root, ".pi/settings.json"), "utf8");
+  await h.command.handler("", h.context);
+  assert.equal(fs.readFileSync(path.join(h.root, ".pi/settings.json"), "utf8"), before);
+});
+
+test("FUSION-CMD-06: invalid input does not write", async () => {
+  const h = commandHarness();
+  const before = fs.readFileSync(path.join(h.root, ".pi/settings.json"), "utf8");
+  await h.command.handler("not-a-model", h.context);
+  assert.equal(fs.readFileSync(path.join(h.root, ".pi/settings.json"), "utf8"), before);
+});
+
+test("FUSION-CMD-07: persistence failure leaves runtime override unchanged", async () => {
+  const h = commandHarness();
+  await h.command.handler("offline/fixture:low", h.context);
+  fs.chmodSync(path.join(h.root, ".pi"), 0o500);
+  try {
+    await h.command.handler("offline/fixture:high", h.context);
+    assert.match(h.notifications.at(-1)?.[0] ?? "", /persist/i);
+  } finally { fs.chmodSync(path.join(h.root, ".pi"), 0o700); }
+  h.context.hasUI = false;
+  await h.command.handler("", h.context);
+  assert.equal(h.notifications.at(-1)?.[0], "sidekick model: offline/fixture:low");
+});
 
  test("FP-08/Unit: WHEN a task ID is unknown or its cursor is invalid, THE extension SHALL reject unsafe follow-up", async () => {
   const harness = makeHarness({ run: async input => result(input) });

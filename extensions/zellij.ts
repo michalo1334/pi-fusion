@@ -286,6 +286,8 @@ export class ZellijController implements ZellijOperations {
     if (input.cwd) args.push("--cwd", input.cwd);
     args.push("--", ...command);
     const parentNumericId = input.parentPaneId.slice("terminal_".length);
+    // Zellij 0.45.1 routes a no-focus pane action from ZELLIJ_PANE_ID.
+    // --pane-id is only an in-place option, so it cannot anchor a split here.
     const env = { ...process.env, ZELLIJ_PANE_ID: parentNumericId };
     return this.execute("zellij", args, { env });
   }
@@ -333,6 +335,8 @@ export class ZellijController implements ZellijOperations {
     await this.execute("zellij", actionArgs(
       "write-chars", "--pane-id", surface.paneId, shellQuote(scriptPath),
     ));
+    // A separate carriage-return action submits the command. A newline in
+    // write-chars is not the documented Enter key on Zellij 0.45.1.
     await this.execute("zellij", actionArgs("write", "--pane-id", surface.paneId, "13"));
   }
 

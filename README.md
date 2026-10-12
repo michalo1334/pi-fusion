@@ -1,11 +1,10 @@
 # pi-fusion
 
-This extension implements a lead/sidekick harness for Pi. The lead owns requirements, decisions, review, and commits.
-The sidekick implements and checks delegated work.
+This package gives a lead Pi session two blocking tools for restricted sidekick tasks. Each sidekick runs as a child Pi TUI in an owned Zellij pane.
 
-This is an installable Pi package from [`michalo1334/pi-fusion`](https://github.com/michalo1334/pi-fusion), forked from
-[`JoniBR/pi-fusion`](https://github.com/JoniBR/pi-fusion). It retains the agent library's sidekick policy and
-compatibility fixes. See `PROVENANCE.md` for the upstream commit and license declaration.
+The lead owns requirements, decisions, review, and commits. The sidekick works from the brief and returns a report.
+
+This is an installable Pi package from [`michalo1334/pi-fusion`](https://github.com/michalo1334/pi-fusion), forked from [`JoniBR/pi-fusion`](https://github.com/JoniBR/pi-fusion). It retains the agent library's sidekick policy and compatibility fixes. See `PROVENANCE.md` for the upstream commit and license declaration.
 
 ## Installation
 
@@ -15,50 +14,90 @@ From the consuming project's root:
 pi install git:github.com/michalo1334/pi-fusion --local
 ```
 
-Review the package before granting project trust. Pi loads the extension and lead skill from this package; do not also
-copy them into `.pi/extensions/` or `.pi/skills/`. Restart Pi after installation. Use Pi's package updater for updates.
-
-## Tools
-
-- `delegate(brief)` starts one restricted child Pi TUI in an owned Zellij pane. It blocks until the child turn settles and
-  returns the report, status, cost, session path, and a `task_id`.
-- Zellij must be active before `delegate` runs. Pi Fusion checks both the host Zellij marker and the `zellij` executable.
-  It keeps lead focus, targets the created pane by ID, and uses split, stacked, and tab placement fallbacks.
-- Successful panes close through the lead. Failed, interrupted, timed-out, or lost runs keep their pane and artifacts for
-  inspection. Prompts stay in private run files; the pane receives an artifact wrapper command.
-- `follow_up(task_id, message)` opens a new pane and resumes the same child session. It returns only the new report and
-  usage. A follow-up keeps the model, thinking level, tools, extensions, working directory, and timeout selected for
-  the original task.
-- Task IDs and child sessions are process-local to the lead. Child session files and run sidecars remain on disk for
-  inspection. A task is not silently resumed after a Pi restart. A busy task rejects concurrent follow-up calls.
+Review the package before you grant project trust. Pi loads the extension and lead skill from this package. Do not copy them into `.pi/extensions/` or `.pi/skills/`. Restart Pi after installation. Use Pi's package updater for later updates.
 
 ## Lead skill
 
-The package provides the `fusion` delegation playbook from `skills/fusion/SKILL.md`. Pi discovers it through the package
-manifest. The lead loads it before delegation. The sidekick does not load it.
+The package provides the `fusion` delegation playbook from `skills/fusion/SKILL.md`. Pi discovers it through the package manifest. The lead loads it before delegation. The sidekick does not load it.
 
-## Sidekick environment
+## Zellij is required
 
-The child loads no discovered context files, skills, prompt templates, themes, or arbitrary project extensions. It loads
-only the selected explicit extensions and the child runtime. It cannot call `delegate` or `follow_up`, so it cannot create
-nested sidekicks. Configuration that requests those tools or the Fusion extension fails before the child starts.
+Fusion supports Zellij only. It does not support cmux, tmux, WezTerm, or a headless fallback.
 
-`fusion.sidekickTools` is an exact tool allowlist. The supported values are:
+Start Pi inside an active Zellij session:
+
+```sh
+zellij
+pi
+```
+
+Run `delegate` from that Pi session. Fusion checks the Zellij environment marker, the `zellij` executable, and the host pane ID before it creates a task. The numeric pane ID `0` is valid. If the marker or executable is missing, or if `ZELLIJ_PANE_ID` is missing or invalid, Fusion returns setup guidance and does not create a child.
+
+Fusion was tested with Pi 1.1.0 and Zellij 0.45.1. The current child launch protocol requires Linux because it records Linux `/proc` process identity before startup. It aborts child launch on other operating systems. Fusion does not claim macOS or Windows child-launch support. It uses these public Zellij actions: `list-panes`, `new-pane`, `new-tab`, `write-chars`, `write`, `send-keys`, `dump-screen`, `focus-pane-id`, and `close-pane`. A different Zellij version can change these commands or their output.
+
+## Delegate lifecycle
+
+`delegate(brief)` does the following:
+
+1. Checks Zellij and the selected sidekick model before task creation.
+2. Creates a process-local task ID, a child session ID, and private run artifacts.
+3. Opens a split pane. It can use a stacked pane or a new tab when the layout needs it.
+4. Restores focus to the lead pane and targets the child by its explicit pane ID.
+5. Starts one restricted child Pi TUI turn and waits for it to settle.
+6. Reads the new session report and usage from the run cursor.
+7. Closes the pane only after a successful run.
+8. Returns the report, status, cost, session path, and `task_id`.
+
+The tool blocks until the child settles or fails. It does not return an early acknowledgement. Prompt text stays in a private artifact file and is not placed in a shell command.
+
+## Follow-up lifecycle
+
+`follow_up(task_id, message)` opens a new pane and resumes the same child session. It blocks until the new turn settles. It returns only the new report and the new usage. It does not charge or repeat the earlier run.
+
+Task IDs and the task map exist only in the current parent Pi process and extension generation. A Pi restart or `/reload` invalidates old task IDs. Fusion does not reconstruct tasks after a restart. A follow-up also requires an intact saved session and cursor. A failed run can accept a follow-up only when Fusion reports that the session evidence remains valid and cleanup is complete.
+
+A task accepts only one active run at a time. A second follow-up for the same task returns a busy error. Separate tasks use the process-wide placement lock so concurrent pane creation does not race.
+
+## Pane cleanup and cancellation
+
+| Run state | Pane and session behavior |
+| --- | --- |
+| Success | Fusion closes the child pane after it reads the report. The session and run artifacts remain. |
+| Provider, tool, policy, startup, or session error | Fusion keeps the pane and artifacts for inspection. |
+| Timeout, parent cancellation, or user-closed pane | Fusion stops waiting, tries the owned child stop sequence, and keeps the inspection pane when it still exists. |
+| Parent `/reload` or shutdown | Fusion cancels active children, waits for bounded cleanup, and does not close inspection panes. |
+
+Cleanup is idempotent. If Fusion cannot confirm cleanup, it keeps an in-memory cleanup control and writes `cleanup-state.json` in the run artifact directory. The tool result includes `cleanupPending` and an error when available. Inspect that artifact and the pane before retrying or ending the parent session. Do not target a pane by its current focus. Fusion uses the recorded pane ID and a verified child PID.
+
+The safe child-PID protocol uses Linux `/proc/<pid>/stat` identity data. Safe numeric PID termination is currently supported only on Linux. Fusion does not claim safe forced termination on macOS or Windows. A child that cannot establish this identity remains a failed run instead of receiving an unverified numeric signal.
+
+## Errors and troubleshooting
+
+- **No active Zellij or missing executable:** Start `zellij`, then start Pi inside it. Check that the `zellij` executable is on `PATH`.
+- **Missing or invalid parent pane ID:** Start Pi from the Zellij pane that should own the child. A numeric `ZELLIJ_PANE_ID` is required; `0` is valid. Do not set a pane ID from another session.
+- **Selected model is unavailable:** The lead must resolve the provider and model before it creates a task. Check the provider setup, or run `/fusion-model` and select an available model. A model change applies to a new `delegate`; a follow-up keeps the original model.
+- **Child policy readiness failure:** The child disables tools first, waits briefly for selected extensions to register, and then checks the exact requested tool names. A missing tool, recursive Fusion tool, or readiness timeout fails before the model turn and leaves the pane and `runtime-error.json` available for inspection. A missing selected extension fails before child pane creation.
+- **Lost pane:** If the user closes the child pane, Fusion reports a surface-loss error. The child session may still be usable only if the returned session evidence is complete. Do not assume that screen text proves completion.
+- **Session integrity error:** A truncated, replaced, or rewritten session file cannot be resumed. Start a new task with `delegate`.
+- **Timeout or cancellation:** Increase `timeoutMinutes` only for a new task when the work needs more time. Fusion first sends an interrupt, then uses the owned PID identity for bounded termination on Linux. The failed pane remains open when possible.
+- **Failed cleanup:** Read `cleanup-state.json`, the run `exit.json`, and the pane transcript. A task with unresolved cleanup rejects `follow_up` until cleanup is confirmed.
+
+## Child resources and policy
+
+Fusion passes the selected provider, model, thinking level, and session directory to the child. The parent applies the configured timeout to each child run. The child loads no discovered context files, skills, prompt templates, themes, or arbitrary project extensions. It loads only the child runtime and the explicitly selected extension paths. Fusion itself is excluded, so the child cannot call `delegate` or `follow_up`.
+
+`fusion.sidekickTools` is a tool-name allowlist. Supported names are:
 
 - Pi built-ins: `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls`.
-- MCP adapter tools: `mcp`, `mcpScript`, `mcp__blender_mcp`, `mcp__svelte`, and `mcp__web_search`.
+- MCP adapter names: `mcp`, `mcpScript`, `mcp__blender_mcp`, `mcp__svelte`, and `mcp__web_search`.
 
-`fusion.sidekickExtensions` selects the package extensions that the sidekick loads. The supported values are
-`pi-mcp-adapter` and `context-mode`. Select `pi-mcp-adapter` when `sidekickTools` contains an MCP adapter tool.
+The child checks that these names are registered and active before it accepts input. An allowed adapter or gateway name can still reach capabilities controlled by that adapter or its server. The list does not prove server-side authorization or describe every action behind an opaque tool. Configure MCP servers and their permissions separately.
 
-The sidekick loads the selected `context-mode` extension for its commands and hooks. The configured tool allowlist does
-not include `ctx_*` names. Loading a package does not automatically permit every tool it provides.
-
-A policy change applies to a new `delegate` call. A `follow_up` call keeps the existing sidekick session and tool set.
+`fusion.sidekickExtensions` supports `pi-mcp-adapter` and `context-mode`. Select `pi-mcp-adapter` when the tool list includes an MCP adapter name. Loading an extension does not automatically allow every tool that it provides. Fusion fails closed when a selected extension path is missing or a requested tool is not ready.
 
 ## Configuration
 
-Set the sidekick model, timeout, tools, and extensions in `.pi/settings.json` or the user-level Pi settings:
+Set values in `.pi/settings.json` or the user-level Pi settings:
 
 ```json
 {
@@ -71,12 +110,28 @@ Set the sidekick model, timeout, tools, and extensions in `.pi/settings.json` or
 }
 ```
 
-Run `/fusion-model` without an argument to select a provider and model in the Pi TUI. Use
-`/fusion-model provider/model[:thinking]` to set a value directly. `PI_FUSION_MODEL` overrides settings. The slash
-command overrides both.
+The public configuration values are:
+
+- `sidekickModel`: provider, model, and optional thinking level.
+- `timeoutMinutes`: maximum time for each child turn.
+- `sidekickTools`: exact tool names passed to the child policy.
+- `sidekickExtensions`: supported explicit extension IDs.
+
+`PI_FUSION_MODEL` overrides the model in settings. `/fusion-model` overrides that value for the current Pi process. The slash command uses the lead model registry, so the selected model must be available there. Settings and overrides affect new `delegate` calls. A follow-up keeps the original model, tools, extensions, working directory, and timeout.
+
+## Cost accounting
+
+Each run reports the child provider usage and `cost_usd`. Fusion records each run ID once and rolls its cost into the next parent-session assistant usage message. A follow-up adds only its new usage. Reload and shutdown preserve pending cost for the same parent session, while a different parent session cannot consume it. Offline faux-provider tests use zero cost by design; they prove no billing, not production price arithmetic. Arithmetic regressions are covered by the runner and parser unit tests.
 
 ## Development checks
 
-Use Node.js with TypeScript stripping support. Install dev dependencies with `npm ci --ignore-scripts`. Run `npm test`
-and `npm run check`. The integration tests load the package through Pi and create an isolated session without making
-model requests. Policy tests check that the sidekick cannot load Fusion or call its delegation tools.
+Use Node.js with TypeScript stripping support. Install development dependencies with `npm ci --ignore-scripts`. Run:
+
+```sh
+npm test
+npm run check
+```
+
+`npm test` runs the offline child, lifecycle, policy, parser, and package tests. It uses local provider fixtures and makes no paid provider or network requests. `npm run test:real` runs the model-free Zellij surface and real child-TUI checks with one test worker. It skips with an explicit reason when Zellij is inactive or its executable is missing. It does not use a paid provider.
+
+The package manifest exposes only `extensions/fusion.ts` and `skills/`. The child runtime is loaded by the child process and is not a public package extension entry point.

@@ -11,6 +11,8 @@ export function disableChildTools(pi: Pick<ExtensionAPI, "setActiveTools">): voi
 export function validateChildTools(pi: Pick<ExtensionAPI, "getAllTools" | "getActiveTools" | "setActiveTools">, requested: readonly string[]): void {
   try {
     assertNoRecursiveFusionTools(requested);
+    // This checks the names declared to Pi. An opaque adapter name can still
+    // reach capabilities controlled by that adapter or its server.
     const available = new Set(pi.getAllTools().map(tool => tool.name));
     const missing = requested.filter(tool => !available.has(tool));
     if (missing.length > 0) throw new Error(`Fusion child policy rejected missing tools: ${missing.join(", ")}`);

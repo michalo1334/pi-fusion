@@ -31,8 +31,12 @@ export function validateChildTools(pi: Pick<ExtensionAPI, "getAllTools" | "getAc
 
 function requestedTools(): string[] {
   const value = process.env.PI_FUSION_TOOLS;
-  if (!value) throw new Error("Fusion child policy is missing PI_FUSION_TOOLS");
-  return value.split(",").map(tool => tool.trim()).filter(Boolean);
+  if (!value || value.trim() === "") throw new Error("Fusion child policy is missing PI_FUSION_TOOLS");
+  const tools = value.split(",").map(tool => tool.trim());
+  if (tools.some(tool => !tool)) throw new Error("Fusion child policy has a malformed PI_FUSION_TOOLS list");
+  if (new Set(tools).size !== tools.length) throw new Error("Fusion child policy has duplicate PI_FUSION_TOOLS entries");
+  assertNoRecursiveFusionTools(tools);
+  return tools;
 }
 
 function deadlineMs(): number {
@@ -60,6 +64,7 @@ export default function childRuntime(pi: ExtensionAPI): void {
   if (process.env.PI_FUSION_CHILD !== "1") return;
 
   let policyFailure: ChildPolicyFailure | undefined;
+  let requested: string[] | undefined;
   let pendingRuntimeError: string | undefined;
   let shuttingDown = false;
   const recordRuntimeError = (message: string) => {
@@ -73,28 +78,48 @@ export default function childRuntime(pi: ExtensionAPI): void {
       pendingRuntimeError = `${message}; could not write runtime error sidecar: ${error instanceof Error ? error.message : String(error)}`;
     }
   };
-  const fail = (ctx: { shutdown: () => void }, error: unknown) => {
+  const fail = (ctx: { abort?: () => void; shutdown: () => void }, error: unknown) => {
     if (policyFailure) return;
     policyFailure = { message: error instanceof Error ? error.message : String(error) };
     process.exitCode = 78;
     disableChildTools(pi);
     recordRuntimeError(`Fusion child policy failure: ${policyFailure.message}`);
+    // A before_agent_start shutdown alone is not a model-turn cancellation.
+    // Abort first, then request process shutdown after the aborted turn settles.
+    ctx.abort?.();
     if (!shuttingDown) { shuttingDown = true; ctx.shutdown(); }
   };
   pi.on("session_start", () => {
     disableChildTools(pi);
   });
-  pi.on("input", async (_event, ctx) => {
+  pi.on("input", (_event, ctx) => {
     if (policyFailure) return { action: "handled" as const };
-    let requested: string[];
     try { requested = requestedTools(); }
     catch (error) { fail(ctx, error); return { action: "handled" as const }; }
-    try { await waitForTools(pi, requested); validateChildTools(pi, requested); }
-    catch (error) { fail(ctx, error); return { action: "handled" as const }; }
-    return policyFailure ? { action: "handled" as const } : { action: "continue" as const };
+    // Do not await lazy extension tools here. Pi waits for input handlers before
+    // it emits before_agent_start, where context-mode starts its bridge.
+    return { action: "continue" as const };
+  });
+  pi.on("before_agent_start", async (_event, ctx) => {
+    if (policyFailure) return;
+    if (!requested) {
+      fail(ctx, new Error("Fusion child policy was not validated during input"));
+      return;
+    }
+    try {
+      // Child argv loads configured trusted extensions before this runtime, so
+      // their before_agent_start hooks can register lazy tools before validation.
+      await waitForTools(pi, requested);
+      validateChildTools(pi, requested);
+    } catch (error) { fail(ctx, error); }
+  });
+  // Pi starts the agent after before_agent_start. A failed validation must also
+  // abort that newly active run, before it can dispatch a provider request.
+  pi.on("agent_start", (_event, ctx) => {
+    if (policyFailure) ctx.abort();
   });
   pi.on("tool_call", (event, ctx) => {
-    if (policyFailure || !process.env.PI_FUSION_TOOLS?.split(",").includes(event.toolName)) {
+    if (policyFailure || !requested?.includes(event.toolName)) {
       return { block: true, reason: policyFailure?.message ?? "Fusion child policy denied this tool" };
     }
     return undefined;

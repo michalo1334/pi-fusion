@@ -76,6 +76,8 @@ test("FP-04/EARS: builds exact restricted CLI policy without prompt interpolatio
   assert.deepEqual(args.slice(-2), ["--", "@/artifacts/prompt;rm -rf.md"]);
   assert.ok(!args.join(" ").includes("prompt text"));
   assert.deepEqual(args.slice(args.indexOf("--tools") + 1, args.indexOf("--tools") + 2), ["read,bash,mcp__web_search"]);
+  const extensionPaths = args.flatMap((value, index) => value === "--extension" ? [args[index + 1]] : []);
+  assert.deepEqual(extensionPaths, ["/extensions/mcp adapter.ts", "/extensions/child-runtime.ts"]);
 });
 
 test("FP-04/Unit: SHALL resolve configured, PATH, and package Pi runtimes", () => {

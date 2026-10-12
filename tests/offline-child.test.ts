@@ -240,3 +240,26 @@ test("FP09-03 Integration: WHEN the child runtime policy fails before a model tu
   assert.equal(exit.policyFailure, true);
   assert.equal(fs.existsSync(path.join(root, "evidence.json")), false, "a policy failure must not make a model turn");
 });
+
+test("FUSION-CTX-05 Integration: WHEN a requested lazy tool is never registered, THEN the child SHALL write a policy sidecar before any model turn", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fusion-fp09-lazy-policy-"));
+  const taskId = `task-${randomUUID()}`;
+  const runId = `run-${randomUUID()}`;
+  const sessionDir = path.join(root, "sessions");
+  const artifacts = runDirArtifacts(root, taskId, runId);
+  const evidencePath = path.join(root, "evidence.json");
+  const spec = launchSpec(root, taskId, runId, sessionDir, artifacts, ["ctx_execute"]);
+  createPromptArtifact(artifacts.promptPath, "missing lazy tool must not reach faux provider");
+  createPromptArtifact(artifacts.systemPromptPath, "system policy");
+
+  const run = await runChild(spec, artifacts, {
+    PI_FUSION_FIXTURE_EVIDENCE: evidencePath,
+    PI_FUSION_POLICY_DEADLINE_MS: "20",
+  });
+
+  assert.equal(run.code, 78, run.stderr);
+  const runtimeError = JSON.parse(fs.readFileSync(artifacts.runtimeErrorPath, "utf8")) as { runId: string; error: string };
+  assert.equal(runtimeError.runId, runId);
+  assert.match(runtimeError.error, /missing tools after readiness deadline: ctx_execute/);
+  assert.equal(fs.existsSync(evidencePath), false, "a lazy-tool policy failure must not make a model turn");
+});

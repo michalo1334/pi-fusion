@@ -460,8 +460,12 @@ export function buildChildArgs(spec: ChildLaunchSpec): string[] {
     ...(spec.sessionFile ? ["--session", spec.sessionFile] : ["--session-dir", spec.sessionDir, "--session-id", spec.sessionId]),
     "--tools", spec.tools.join(","),
     "--append-system-prompt", spec.systemPromptPath,
-    "--extension", spec.childRuntimePath,
+    // Pi invokes lifecycle handlers in extension load order. Trusted configured
+    // extensions must initialize lazy tools before child-runtime validates the
+    // exact allowlist in before_agent_start. Keep the runtime last: it remains
+    // the final policy gate and does not give configured extensions extra tools.
     ...spec.extensions.flatMap(extension => ["--extension", extension]),
+    "--extension", spec.childRuntimePath,
     "--", `@${spec.promptPath}`,
   ];
 }

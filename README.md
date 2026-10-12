@@ -40,13 +40,14 @@ Fusion was tested with Pi 1.1.0 and Zellij 0.45.1. The current child launch prot
 `delegate(brief)` does the following:
 
 1. Checks Zellij and the selected sidekick model before task creation.
-2. Creates a process-local task ID, a child session ID, and private run artifacts.
-3. Opens a split pane. It can use a stacked pane or a new tab when the layout needs it.
-4. Restores focus to the lead pane and targets the child by its explicit pane ID.
-5. Starts one restricted child Pi TUI turn and waits for it to settle.
-6. Reads the new session report and usage from the run cursor.
-7. Closes the pane only after a successful run.
-8. Returns the report, status, cost, session path, and `task_id`.
+2. Creates a process-local task ID, a stable child session ID, and private run artifacts.
+3. Seeds one child session header in the lead session directory with `parentSession` set to the persisted lead file.
+4. Opens a split pane. It can use a stacked pane or a new tab when the layout needs it.
+5. Restores focus to the lead pane and targets the child by its explicit pane ID.
+6. Starts one restricted child Pi TUI turn and waits for it to settle.
+7. Reads the new session report and usage from the run cursor.
+8. Closes the pane only after a successful run.
+9. Returns the report, status, cost, session path, and `task_id`.
 
 The tool blocks until the child settles or fails. It does not return an early acknowledgement. Prompt text stays in a private artifact file and is not placed in a shell command.
 
@@ -69,6 +70,8 @@ A task accepts only one active run at a time. A second follow-up for the same ta
 
 Cleanup is idempotent. If Fusion cannot confirm cleanup, it keeps an in-memory cleanup control and writes `cleanup-state.json` in the run artifact directory. The tool result includes `cleanupPending` and an error when available. Inspect that artifact and the pane before retrying or ending the parent session. Do not target a pane by its current focus. Fusion uses the recorded pane ID and a verified child PID.
 
+Child sessions use the Pi `parentSession` header field. The normal Pi session browser discovers the child under the lead when both files are in the lead session directory. An ephemeral lead session has no authoritative parent file, so Fusion rejects `delegate` before child allocation. Fusion does not migrate older child files or copy lead conversation entries.
+
 The safe child-PID protocol uses Linux `/proc/<pid>/stat` identity data. Safe numeric PID termination is currently supported only on Linux. Fusion does not claim safe forced termination on macOS or Windows. A child that cannot establish this identity remains a failed run instead of receiving an unverified numeric signal.
 
 ## Errors and troubleshooting
@@ -84,7 +87,7 @@ The safe child-PID protocol uses Linux `/proc/<pid>/stat` identity data. Safe nu
 
 ## Child resources and policy
 
-Fusion passes the selected provider, model, thinking level, and session directory to the child. The parent applies the configured timeout to each child run. The child loads no discovered context files, skills, prompt templates, themes, or arbitrary project extensions. It loads only the child runtime and the explicitly selected extension paths. Fusion itself is excluded, so the child cannot call `delegate` or `follow_up`.
+Fusion passes the selected provider, model, thinking level, and exact pre-seeded session file to the child. The child opens that file with `--session`, so follow-ups keep the same file and parent header. The parent applies the configured timeout to each child run. The child loads no discovered context files, skills, prompt templates, themes, or arbitrary project extensions. It loads only the child runtime and the explicitly selected extension paths. Fusion itself is excluded, so the child cannot call `delegate` or `follow_up`.
 
 `fusion.sidekickTools` is a tool-name allowlist. Supported names are:
 

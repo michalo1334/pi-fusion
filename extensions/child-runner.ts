@@ -15,6 +15,7 @@ import {
   type RunArtifacts,
 } from "./child-process.ts";
 import { SessionIntegrityError, type SessionCursor } from "./session-parser.ts";
+import { validateChildSessionIdentity, validateChildSessionLineage } from "./session-lineage.ts";
 import {
   detectZellij,
   hasZellijExecutable,
@@ -39,6 +40,10 @@ export interface ChildRunInput {
   artifactRoot: string;
   sessionDir: string;
   sessionId: string;
+  /** Exact child session file. Fusion seeds this file before every initial launch. */
+  sessionFile?: string;
+  /** Authoritative lead session file used to validate child lineage. */
+  parentSessionFile?: string;
   model: ChildModel;
   tools: string[];
   extensions: string[];
@@ -99,8 +104,20 @@ export function zellijAvailability(env: NodeJS.ProcessEnv, hasBinary: boolean): 
 }
 
 function mkdirPrivate(dir: string): void {
+  let existed = false;
+  try {
+    const stat = fs.lstatSync(dir);
+    existed = true;
+    if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error(`Session directory must be a real directory: ${dir}`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  fs.chmodSync(dir, 0o700);
+  const stat = fs.lstatSync(dir);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error(`Session directory must be a real directory: ${dir}`);
+  // The lead session directory is shared with the parent. Only chmod a
+  // directory that this runner created itself.
+  if (!existed) fs.chmodSync(dir, 0o700);
 }
 
 function defaultFindSessionFile(sessionDir: string, sessionId: string): string | undefined {
@@ -167,7 +184,7 @@ async function readAvailableEvidence(
   sleep: (ms: number) => Promise<void>,
   exitRecord?: ExitRecord,
 ): Promise<Evidence> {
-  const sessionFile = await waitForSessionFile(input.sessionDir, input.sessionId, findSessionFile, sleep);
+  const sessionFile = input.sessionFile ?? await waitForSessionFile(input.sessionDir, input.sessionId, findSessionFile, sleep);
   if (!sessionFile) return { report: FALLBACK_REPORT, costUsd: 0, taskValid: true };
   try {
     const parsed = await readIncrementalResult(sessionFile, preRunCursor, {
@@ -217,15 +234,32 @@ export async function runChildTask(
   if (input.signal?.aborted) throw new Error("Child run was cancelled before allocation");
 
   const sleep = dependencies.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  if (input.parentSessionFile && !input.sessionFile) {
+    throw new Error("Child lineage requires an exact pre-seeded session file");
+  }
   const controller = dependencies.zellij ?? new ZellijController();
   const findSessionFile = dependencies.findSessionFile ?? defaultFindSessionFile;
   const artifacts = allocateRunArtifacts(input.artifactRoot, input.taskId, input.runId);
   mkdirPrivate(input.sessionDir);
-  const existingSessionFile = findSessionFile(input.sessionDir, input.sessionId);
+  const foundSessionFile = input.sessionFile ?? findSessionFile(input.sessionDir, input.sessionId);
+  const existingSessionFile = foundSessionFile && fs.existsSync(foundSessionFile) ? foundSessionFile : undefined;
+  if (input.sessionFile && !existingSessionFile) {
+    throw new Error(`Cannot launch child session ${input.sessionId}: the pre-seeded session file is missing`);
+  }
   if (input.requireExistingSession && !existingSessionFile) {
     throw new Error(`Cannot resume child session ${input.sessionId}: the saved session file is missing or invalid`);
   }
-  if (existingSessionFile && input.expectedSessionCursor) validateSessionCursor(existingSessionFile, input.expectedSessionCursor);
+  if (existingSessionFile) {
+    try {
+      if (input.parentSessionFile) validateChildSessionLineage(existingSessionFile, input.sessionId, input.parentSessionFile);
+      else validateChildSessionIdentity(existingSessionFile, input.sessionId);
+    } catch (error) {
+      throw new SessionIntegrityError(`Child session lineage validation failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (input.expectedSessionCursor) validateSessionCursor(existingSessionFile, input.expectedSessionCursor);
+  }
+  // Capture the seeded header as the prefix. The first user message belongs to
+  // the new run and is therefore included in its evidence only.
   const preRunCursor: SessionCursor = existingSessionFile
     ? captureSessionCursor(existingSessionFile)
     : { byteOffset: 0 };
@@ -237,6 +271,7 @@ export async function runChildTask(
     artifactRoot: input.artifactRoot,
     sessionDir: input.sessionDir,
     sessionId: input.sessionId,
+    sessionFile: input.sessionFile,
     model: input.model,
     tools: input.tools,
     extensions: input.extensions,

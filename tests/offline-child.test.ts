@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import {
   allocateRunArtifacts,
   buildChildArgs,
@@ -16,6 +17,7 @@ import {
   type RunArtifacts,
   type SessionCursor,
 } from "../extensions/child-process.ts";
+import { seedChildSessionFile } from "../extensions/session-lineage.ts";
 
 const fixture = path.resolve("tests/fixtures/offline-provider.ts");
 const repo = path.resolve(".");
@@ -174,6 +176,43 @@ test("FP09-02 Integration: WHEN a new generated child resumes the stored session
   const evidence = JSON.parse(fs.readFileSync(evidencePath, "utf8")) as { response: string; messages: Array<{ role: string; content: unknown }> };
   assert.equal(evidence.response, "offline-follow-up");
   assert.ok(evidence.messages.some(message => JSON.stringify(message.content).includes("offline-first")), "second process must see prior conversation");
+});
+
+test("LINEAGE-03 Integration: WHEN two offline child processes run, THE exact --session path SHALL preserve one seeded parent header and one follow-up file", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fusion-lineage-offline-"));
+  const taskId = `task-${randomUUID()}`;
+  const sessionDir = path.join(root, "sessions");
+  fs.mkdirSync(sessionDir, { recursive: true });
+  const parent = SessionManager.create(root, sessionDir, { id: "lead-session" });
+  const parentFile = parent.getSessionFile()!;
+  fs.writeFileSync(parentFile, `${JSON.stringify(parent.getHeader())}\n`, { mode: 0o600 });
+  const childFile = seedChildSessionFile({ parentSessionFile: parentFile, childCwd: root, sessionDir, childSessionId: "offline-lineage" });
+  const firstRunId = `run-${randomUUID()}`;
+  const firstArtifacts = runDirArtifacts(root, taskId, firstRunId);
+  const firstSpec = { ...launchSpec(root, taskId, firstRunId, sessionDir, firstArtifacts), sessionFile: childFile };
+  createPromptArtifact(firstArtifacts.promptPath, "lineage first process");
+  createPromptArtifact(firstArtifacts.systemPromptPath, "system policy");
+  const firstArgs = buildChildArgs(firstSpec);
+  assert.ok(firstArgs.includes("--session"));
+  assert.ok(firstArgs.includes(childFile));
+  assert.equal(firstArgs.includes("--session-dir"), false);
+  assert.equal(firstArgs.includes("--session-id"), false);
+  const first = await runChild(firstSpec, firstArtifacts, {});
+  assert.equal(first.code, 0, first.stderr);
+  const headerBefore = fs.readFileSync(childFile, "utf8").split("\n", 1)[0];
+  const cursor = captureSessionCursor(childFile);
+  const secondRunId = `run-${randomUUID()}`;
+  const secondArtifacts = runDirArtifacts(root, taskId, secondRunId);
+  const secondSpec = { ...launchSpec(root, taskId, secondRunId, sessionDir, secondArtifacts), sessionFile: childFile };
+  createPromptArtifact(secondArtifacts.promptPath, "lineage follow-up process");
+  createPromptArtifact(secondArtifacts.systemPromptPath, "system policy");
+  const second = await runChild(secondSpec, secondArtifacts, {});
+  assert.equal(second.code, 0, second.stderr);
+  assert.equal(secondSpec.sessionFile, childFile);
+  assert.equal(fs.readFileSync(childFile, "utf8").split("\n", 1)[0], headerBefore);
+  const followup = await readIncrementalResult(childFile, cursor, { processExited: true, exitStatus: { exitCode: 0 } });
+  assert.equal(followup.report, "offline-follow-up");
+  assert.equal(JSON.parse(headerBefore).parentSession, parentFile);
 });
 
 test("FP09-03 Integration: WHEN the child runtime policy fails before a model turn, THEN the wrapper SHALL write runtime-error and a non-success exit record", async () => {

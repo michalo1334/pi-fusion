@@ -15,6 +15,8 @@ export interface ChildLaunchSpec {
   artifactRoot: string;
   sessionDir: string;
   sessionId: string;
+  /** Exact pre-seeded session file. Production launches must use this path. */
+  sessionFile?: string;
   model: { provider: string; id: string; thinking: string };
   tools: string[];
   extensions: string[];
@@ -441,7 +443,7 @@ export function buildChildArgs(spec: ChildLaunchSpec): string[] {
   return [
     "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-mcp",
     "--provider", spec.model.provider, "--model", spec.model.id, "--thinking", spec.model.thinking,
-    "--session-dir", spec.sessionDir, "--session-id", spec.sessionId,
+    ...(spec.sessionFile ? ["--session", spec.sessionFile] : ["--session-dir", spec.sessionDir, "--session-id", spec.sessionId]),
     "--tools", spec.tools.join(","),
     "--append-system-prompt", spec.systemPromptPath,
     "--extension", spec.childRuntimePath,

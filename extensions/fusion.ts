@@ -30,6 +30,7 @@ import {
   assertNoRecursiveFusionTools,
 } from "./sidekick-policy.ts";
 import { SessionIntegrityError } from "./session-parser.ts";
+import { seedChildSessionFile } from "./session-lineage.ts";
 
 const MAX_LOG_LINES = 30;
 const SHORT_REPORT_CHARS = 200;
@@ -71,6 +72,8 @@ interface ChildTask {
   id: string;
   sessionId: string;
   sessionDir: string;
+  sessionFile: string;
+  parentSessionFile: string;
   cwd: string;
   artifactRoot: string;
   model: ChildModel;
@@ -79,7 +82,6 @@ interface ChildTask {
   childRuntimePath: string;
   timeoutMs: number;
   parentSessionKey: string;
-  sessionFile?: string;
   validForFollowUp: boolean;
   status?: string;
   activeRun?: { runId: string };
@@ -489,6 +491,8 @@ export function createFusionExtension(pi: ExtensionAPI, dependencies: FusionRunt
         artifactRoot: task.artifactRoot,
         sessionDir: task.sessionDir,
         sessionId: task.sessionId,
+        sessionFile: task.sessionFile,
+        parentSessionFile: task.parentSessionFile,
         model: task.model,
         tools: task.tools,
         extensions: task.extensions,
@@ -515,10 +519,15 @@ export function createFusionExtension(pi: ExtensionAPI, dependencies: FusionRunt
     if (!current()) return;
     task.cleanupPending = result.cleanupPending;
     task.cleanupError = result.errorMessage;
-    task.sessionFile = result.sessionFile ?? task.sessionFile;
+    if (result.sessionFile && path.resolve(result.sessionFile) !== path.resolve(task.sessionFile)) {
+      task.validForFollowUp = false;
+      task.resumeAfterCleanup = false;
+      task.cleanupError = `Child runner returned an unexpected session file: ${result.sessionFile}`;
+    }
     // A complete cursor and a matching session file are required. This keeps
     // malformed or partial records from being resumed unsafely.
-    task.resumeAfterCleanup = result.taskValid && Boolean(result.sessionFile && result.cursor);
+    const exactSession = !result.sessionFile || path.resolve(result.sessionFile) === path.resolve(task.sessionFile);
+    task.resumeAfterCleanup = exactSession && result.taskValid && Boolean(result.sessionFile && result.cursor);
     task.validForFollowUp = task.resumeAfterCleanup && !result.cleanupPending;
     task.status = result.status;
     task.lastRun = result;
@@ -553,9 +562,12 @@ export function createFusionExtension(pi: ExtensionAPI, dependencies: FusionRunt
     parameters: Type.Object({ brief: Type.String({ description: "Task brief written like a spec: goal, constraints, edge cases, and definition of done." }) }),
     renderCall(args, theme, context) { return renderPromptCall("delegate", args.brief, theme, context); },
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      // Detection is deliberately before UUIDs, artifact directories, and pane creation.
+      // Detection and launch preparation must not create persistent child state.
+      // Keep this guard before the first awaited operation.
+      if (signal?.aborted) throw new Error("Child run was cancelled before allocation");
       const detection = await detectZellij(process.env);
       if (!current()) throw new Error("Fusion lifecycle changed before child launch");
+      if (signal?.aborted) throw new Error("Child run was cancelled before allocation");
       const parentPaneId = getParentPaneId(process.env);
       if (!detection.available || !parentPaneId) {
         throw new Error(detection.setupHint + (parentPaneId ? "" : " ZELLIJ_PANE_ID is missing from the host Pi environment."));
@@ -567,15 +579,29 @@ export function createFusionExtension(pi: ExtensionAPI, dependencies: FusionRunt
       }
       const tools = selectedSidekickTools(cfg.sidekickTools, cfg.sidekickExtensions);
       const extensions = selectedExtensionPaths(ctx.cwd, cfg.sidekickExtensions);
+      if (signal?.aborted) throw new Error("Child run was cancelled before allocation");
       const taskId = randomUUID();
       const sessionId = randomUUID();
       if (!current()) throw new Error("Fusion lifecycle changed before child launch");
+      const parentSessionFile = ctx.sessionManager.getSessionFile();
+      if (signal?.aborted) throw new Error("Child run was cancelled before allocation");
+      if (!parentSessionFile) {
+        throw new Error("pi-fusion cannot group the child under the lead: the lead session has no persisted session file");
+      }
       parentSessionKey = sessionKey(ctx);
       sessionLedger(parentSessionKey);
       const root = artifactRoot(ctx);
-      const sessionDir = path.join(root, taskId, "session");
+      // Keep run artifacts private under artifacts. Keep the child session in
+      // the lead directory so Pi's normal session list can discover it.
+      const sessionDir = ctx.sessionManager.getSessionDir();
+      const sessionFile = seedChildSessionFile({
+        parentSessionFile,
+        childCwd: ctx.cwd,
+        sessionDir,
+        childSessionId: sessionId,
+      });
       const task: ChildTask = {
-        kind: "child", id: taskId, sessionId, sessionDir, cwd: ctx.cwd, artifactRoot: root,
+        kind: "child", id: taskId, sessionId, sessionDir, sessionFile, parentSessionFile, cwd: ctx.cwd, artifactRoot: root,
         model: modelInput(resolved.model, resolved.thinkingLevel), tools: [...tools], extensions: [...extensions],
         childRuntimePath: childRuntimePath(), timeoutMs: cfg.timeoutMinutes * 60_000,
         parentSessionKey, validForFollowUp: true,

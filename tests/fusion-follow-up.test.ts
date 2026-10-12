@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { createFusionExtension, type FusionRuntimeDependencies } from "../extensions/fusion.ts";
 import type { ChildRunResult } from "../extensions/child-runner.ts";
 
@@ -20,12 +21,17 @@ function makeHarness(options: { run?: (input: any) => Promise<ChildRunResult>; r
     on: (name: string, handler: (event: any, ctx?: any) => Promise<unknown> | unknown) => { events.set(name, handler); return () => events.delete(name); },
   } as any;
   const model = { provider: "offline", id: "fixture" };
+  const sessionDir = path.join(root, "sessions");
+  fs.mkdirSync(sessionDir, { recursive: true });
+  const leadManager = SessionManager.create(root, sessionDir, { id: "lead-session" });
+  const leadFile = leadManager.getSessionFile()!;
+  fs.writeFileSync(leadFile, `${JSON.stringify(leadManager.getHeader())}\n`, { mode: 0o600 });
   const context = {
     cwd: root,
     hasUI: false,
     ui: { notify: () => {} },
     modelRegistry: { find: () => model, getAvailable: () => [model] },
-    sessionManager: { getSessionDir: () => path.join(root, "sessions"), getSessionId: () => "lead-session" },
+    sessionManager: { getSessionDir: () => sessionDir, getSessionId: () => "lead-session", getSessionFile: () => leadFile },
   } as any;
   const dependencies: FusionRuntimeDependencies = {
     runChildTask: options.run,
@@ -39,7 +45,7 @@ function makeHarness(options: { run?: (input: any) => Promise<ChildRunResult>; r
 function result(input: any, status: ChildRunResult["status"] = "ok", valid = true): ChildRunResult {
   return {
     taskId: input.taskId, runId: input.runId, status, report: `report-${input.runId}`, costUsd: 0.25,
-    sessionFile: path.join(input.sessionDir, `${input.sessionId}.jsonl`), sessionDir: input.sessionDir,
+    sessionFile: input.sessionFile ?? path.join(input.sessionDir, `${input.sessionId}.jsonl`), sessionDir: input.sessionDir,
     cursor: valid ? { byteOffset: 10, sessionId: input.sessionId } : undefined,
     artifacts: {} as any, taskValid: valid,
   };
@@ -60,6 +66,57 @@ const call = (tool: any, params: any, context: any, signal = new AbortController
   await assert.rejects(() => call(invalid.tools.get("follow_up"), { task_id: failed.details.taskId, message: "retry" }, invalid.context), /missing or invalid/);
   assert.match(first.details.taskId, /^[0-9a-f-]+$/);
  });
+
+test("LINEAGE-04 Unit: IF the lead session is ephemeral, THEN delegate SHALL reject before child allocation", async () => {
+  let launched = false;
+  const harness = makeHarness({ run: async input => { launched = true; return result(input); } });
+  harness.context.sessionManager = {
+    getSessionDir: () => path.join(harness.root, "sessions"),
+    getSessionId: () => "lead-session",
+    getSessionFile: () => undefined,
+  };
+  await assert.rejects(() => call(harness.tools.get("delegate"), { brief: "no fabricated parent" }, harness.context), /no persisted session file/);
+  assert.equal(launched, false);
+});
+
+test("LINEAGE-07 Unit: IF delegate starts with an aborted signal, THEN it SHALL create no child session, task artifacts, or runner call", async () => {
+  let detectionCalls = 0;
+  let runnerCalls = 0;
+  const harness = makeHarness({
+    check: async () => { detectionCalls += 1; return { available: true, setupHint: "" }; },
+    run: async input => { runnerCalls += 1; return result(input); },
+  });
+  const sessionDir = path.join(harness.root, "sessions");
+  const before = fs.readdirSync(sessionDir);
+  const signal = new AbortController();
+  signal.abort();
+  await assert.rejects(() => call(harness.tools.get("delegate"), { brief: "cancel before allocation" }, harness.context, signal.signal), /cancelled before allocation/);
+  assert.equal(detectionCalls, 0);
+  assert.equal(runnerCalls, 0);
+  assert.deepEqual(fs.readdirSync(sessionDir), before);
+  assert.equal(fs.existsSync(path.join(sessionDir, "artifacts")), false);
+});
+
+test("LINEAGE-08 Unit: WHEN delegate is aborted during Zellij detection, THEN it SHALL seed no child session or task artifacts", async () => {
+  let releaseDetection!: () => void;
+  let runnerCalls = 0;
+  const detection = new Promise<void>(resolve => { releaseDetection = resolve; });
+  const harness = makeHarness({
+    check: async () => { await detection; return { available: true, setupHint: "" }; },
+    run: async input => { runnerCalls += 1; return result(input); },
+  });
+  const sessionDir = path.join(harness.root, "sessions");
+  const before = fs.readdirSync(sessionDir);
+  const controller = new AbortController();
+  const pending = call(harness.tools.get("delegate"), { brief: "cancel during detection" }, harness.context, controller.signal);
+  await new Promise(resolve => setImmediate(resolve));
+  controller.abort();
+  releaseDetection();
+  await assert.rejects(() => pending, /cancelled before allocation/);
+  assert.equal(runnerCalls, 0);
+  assert.deepEqual(fs.readdirSync(sessionDir), before);
+  assert.equal(fs.existsSync(path.join(sessionDir, "artifacts")), false);
+});
 
 test("FP-08/Integration: WHEN follow-up runs, THE extension SHALL use the same session and selected policy with a new run", async () => {
   const calls: any[] = [];

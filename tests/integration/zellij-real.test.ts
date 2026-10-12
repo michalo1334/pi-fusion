@@ -3,9 +3,11 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { ZellijController, type ZellijSurface } from "../../extensions/zellij.ts";
 import { runChildTask } from "../../extensions/child-runner.ts";
 import { readIncrementalResult } from "../../extensions/session-parser.ts";
+import { seedChildSessionFile } from "../../extensions/session-lineage.ts";
 import { realZellijAvailability, focusPane, listPanes, makeExecutable, temporaryRoot, waitForFile } from "../real-harness.ts";
 
 const fixture = path.resolve("tests/fixtures/offline-provider.ts");
@@ -93,6 +95,11 @@ test("FP09-05 Integration: WHEN production runChildTask starts in an owned Zelli
   const parent = availability.parentPaneId!;
   const root = temporaryRoot("tui");
   const sessionDir = path.join(root, "sessions");
+  fs.mkdirSync(sessionDir, { recursive: true });
+  const lead = SessionManager.create(root, sessionDir, { id: "real-lead" });
+  const parentSessionFile = lead.getSessionFile()!;
+  fs.writeFileSync(parentSessionFile, `${JSON.stringify(lead.getHeader())}\n`, { mode: 0o600 });
+  const childSessionFile = seedChildSessionFile({ parentSessionFile, childCwd: root, sessionDir, childSessionId: "offline-session" });
   const evidencePath = path.join(root, "fixture-evidence.json");
   const taskId = `task-${randomUUID()}`;
   const firstRunId = `run-${randomUUID()}`;
@@ -108,6 +115,8 @@ test("FP09-05 Integration: WHEN production runChildTask starts in an owned Zelli
     artifactRoot: root,
     sessionDir,
     sessionId: "offline-session",
+    sessionFile: childSessionFile,
+    parentSessionFile,
     model: { provider: "offline-faux", id: "offline", thinking: "off" },
     tools: ["read"],
     extensions: [fixture],
@@ -125,6 +134,9 @@ test("FP09-05 Integration: WHEN production runChildTask starts in an owned Zelli
     first = await runChildTask(input(firstRunId, "real TUI first turn"));
     assert.equal(first.status, "ok", first.errorMessage);
     assert.equal(first.report, "offline-first");
+    assert.equal(first.sessionFile, childSessionFile);
+    const listed = await SessionManager.list(root, sessionDir);
+    assert.equal(listed.find(info => info.path === childSessionFile)?.parentSessionPath, parentSessionFile);
     assert.ok(first.cursor);
     assert.ok(first.sessionFile);
     assert.equal(fs.existsSync(first.artifacts.pidPath), true);
@@ -146,10 +158,13 @@ test("FP09-05 Integration: WHEN production runChildTask starts in an owned Zelli
     assert.equal(evidence.stdioTTY, true, "the owned pane must provide the child inherited TTY");
     assert.ok(evidence.messages.some(message => JSON.stringify(message.content).includes("offline-first")));
 
+    const failedSessionId = "policy-session";
+    const failedSessionFile = seedChildSessionFile({ parentSessionFile, childCwd: root, sessionDir, childSessionId: failedSessionId });
     failed = await runChildTask({
       ...input(`run-${randomUUID()}`, "policy failure in a real pane"),
       taskId: `failed-${randomUUID()}`,
-      sessionId: "policy-session",
+      sessionId: failedSessionId,
+      sessionFile: failedSessionFile,
       tools: [],
     });
     assert.equal(failed.status, "error");

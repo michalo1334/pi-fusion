@@ -222,6 +222,36 @@ test("FP-08/Integration: WHEN /fusion-model changes after delegate, THE follow-u
   assert.notEqual(later.details.costUsd, undefined);
 });
 
+test("CWD-01/Integration: WHEN the parent context cwd differs from process.cwd(), THE delegate and follow-up SHALL pass that cwd to each launch while reusing one session directory", async () => {
+  const parentCwd = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-parent-cwd-"));
+  assert.notEqual(parentCwd, process.cwd());
+  const launches: any[] = [];
+  const harness = makeHarness({
+    root: parentCwd,
+    run: async input => {
+      launches.push({
+        cwd: input.cwd,
+        sessionDir: input.sessionDir,
+        sessionId: input.sessionId,
+        sessionFile: input.sessionFile,
+        requireExistingSession: input.requireExistingSession,
+      });
+      return result(input);
+    },
+  });
+
+  const first = await call(harness.tools.get("delegate"), { brief: "start in the parent project" }, harness.context);
+  await call(harness.tools.get("follow_up"), { task_id: first.details.taskId, message: "continue in the parent project" }, harness.context);
+
+  assert.equal(launches.length, 2);
+  assert.equal(launches[0].cwd, parentCwd);
+  assert.equal(launches[1].cwd, parentCwd);
+  assert.equal(launches[1].sessionDir, launches[0].sessionDir);
+  assert.equal(launches[1].sessionId, launches[0].sessionId);
+  assert.equal(launches[1].sessionFile, launches[0].sessionFile);
+  assert.equal(launches[1].requireExistingSession, true);
+});
+
 test("FP-08/Unit: WHILE a task run is active, THE extension SHALL reject same-task follow-up and allow a separate delegate", async () => {
   const calls: any[] = [];
   let release!: () => void;

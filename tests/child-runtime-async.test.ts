@@ -89,19 +89,19 @@ test("FUSION-CTX-04 Unit: WHEN recursive tools are requested, THEN input SHALL s
   assert.equal(h.shutdowns(), 1);
 }));
 
-test("FP-04 Unit: WHEN requested tools are malformed or absent, the child SHALL consume input safely", async () => {
+test("FUSION-CTX-05 Unit: WHEN requested tools are malformed or absent, the child SHALL consume input safely", async () => {
   for (const value of [undefined, "", "read,,bash"]) await withEnv(value, async () => {
     const h = harness(["read"]); await h.sessionStart();
     assert.deepEqual(await h.input(), { action: "handled" }); assert.deepEqual(h.active(), []); assert.equal(h.shutdowns(), 1);
   });
 });
 
-test("FP-04 Unit: WHEN a tool is added after failure, it SHALL not re-enable and calls SHALL remain blocked", async () => withEnv("read,missing", async () => {
+test("FUSION-CTX-06 Unit: WHEN a tool is added after failure, it SHALL not re-enable and calls SHALL remain blocked", async () => withEnv("read,missing", async () => {
   const h = harness(["read"]); await h.sessionStart(); await h.input(); await h.beforeAgentStart(); h.add("missing");
   assert.deepEqual(h.active(), []); assert.ok(h.call("read")); assert.ok(h.call("missing"));
 }));
 
-test("FP-04 Unit: WHEN an unapproved late tool call occurs, it SHALL be blocked", async () => withEnv("read", async () => {
+test("FUSION-CTX-07 Unit: WHEN an unapproved late tool call occurs, it SHALL be blocked", async () => withEnv("read", async () => {
   const h = harness(["read", "extra"]); await h.sessionStart(); await h.input(); await h.beforeAgentStart();
   assert.equal(h.call("extra").block, true); assert.equal(h.call("read"), undefined);
 }));

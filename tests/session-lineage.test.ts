@@ -77,13 +77,14 @@ test("LINEAGE-02 Integration: WHEN seeding and launching, THE shared lead direct
     childRuntimePath: join(root, "runtime.ts"), systemPrompt: "system", prompt: "brief", parentPaneId: "terminal_1", timeoutMs: 100,
   }, {
     zellij: {
+      closeRetainedSurface: async () => "not-found-or-unowned",
       createSurface: async () => {
         appendFileSync(childFile, `${JSON.stringify({ type: "message", id: "u1", parentId: null, timestamp: new Date(0).toISOString(), message: { role: "user", content: "brief", timestamp: 0 } })}\n`);
         appendFileSync(childFile, `${JSON.stringify({ type: "message", id: "a1", parentId: "u1", timestamp: new Date(0).toISOString(), message: { role: "assistant", content: [{ type: "text", text: "runner report" }], stopReason: "stop", timestamp: 0 } })}\n`);
         writeExitSidecar(join(runDir, "exit.json"), { runId, exitCode: 0, finishedAt: new Date().toISOString() });
         return surface;
       },
-      sendCommand: async () => {}, interrupt: async () => {}, close: async () => {}, paneExists: async () => true, screen: async () => "",
+      interrupt: async () => {}, close: async () => {}, paneExists: async () => true,
     },
     sleep: async () => {},
   });

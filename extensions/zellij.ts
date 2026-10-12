@@ -139,21 +139,15 @@ export type RetainedSurfaceCloseResult = "closed" | "not-found-or-unowned" | "ca
 
 export interface ZellijOperations {
   createSurface(input: CreateSurfaceInput): Promise<ZellijSurface>;
-  /** Close only a terminal pane whose current command proves it is the retained run. Optional for legacy test seams. */
-  closeRetainedSurface?(input: RetainedSurfaceCloseInput): Promise<RetainedSurfaceCloseResult>;
-  sendCommand(surface: ZellijSurface, scriptPath: string): Promise<void>;
+  /** Close only a terminal pane whose current command proves it is the retained run. */
+  closeRetainedSurface(input: RetainedSurfaceCloseInput): Promise<RetainedSurfaceCloseResult>;
   interrupt(surface: ZellijSurface): Promise<void>;
   close(surface: ZellijSurface): Promise<void>;
   paneExists(surface: ZellijSurface): Promise<boolean>;
-  screen(surface: ZellijSurface, full?: boolean): Promise<string>;
 }
 
 function actionArgs(action: string, ...args: string[]): string[] {
   return ["action", action, ...args];
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 function isTerminalPaneId(value: string): boolean {
@@ -385,16 +379,6 @@ export class ZellijController implements ZellijOperations {
     }
   }
 
-  async sendCommand(surface: ZellijSurface, scriptPath: string): Promise<void> {
-    this.assertSurface(surface);
-    await this.execute("zellij", actionArgs(
-      "write-chars", "--pane-id", surface.paneId, shellQuote(scriptPath),
-    ));
-    // A separate carriage-return action submits the command. A newline in
-    // write-chars is not the documented Enter key on Zellij 0.45.1.
-    await this.execute("zellij", actionArgs("write", "--pane-id", surface.paneId, "13"));
-  }
-
   async interrupt(surface: ZellijSurface): Promise<void> {
     this.assertSurface(surface);
     try {
@@ -419,13 +403,6 @@ export class ZellijController implements ZellijOperations {
     this.assertSurface(surface);
     const panes = await this.listPanes();
     return panes.some(pane => !pane.is_plugin && !pane.exited && paneIdFromInfo(pane) === surface.paneId);
-  }
-
-  async screen(surface: ZellijSurface, full = false): Promise<string> {
-    this.assertSurface(surface);
-    const args = actionArgs("dump-screen", "--pane-id", surface.paneId);
-    if (full) args.push("--full");
-    return (await this.execute("zellij", args)).stdout;
   }
 
   private assertSurface(surface: ZellijSurface): void {

@@ -75,7 +75,6 @@ const DEFAULTS: FusionConfig = {
 };
 
 interface ChildTask {
-  kind: "child";
   id: string;
   sessionId: string;
   sessionDir: string;
@@ -89,17 +88,24 @@ interface ChildTask {
   childRuntimePath: string;
   timeoutMs: number;
   parentSessionKey: string;
-  validForFollowUp: boolean;
-  status?: string;
   activeRun?: { runId: string };
   cleanupPending?: boolean;
   cleanupError?: string;
-  resumeAfterCleanup?: boolean;
   /** Retain the latest run surface, cursor, and evidence for follow-up. */
   lastRun?: ChildRunResult;
 }
 
-type Task = ChildTask;
+function followUpIsValid(task: ChildTask): boolean {
+  const result = task.lastRun;
+  return Boolean(
+    !task.cleanupPending
+    && task.sessionFile
+    && result?.taskValid
+    && result.sessionFile
+    && result.cursor
+    && path.resolve(result.sessionFile) === path.resolve(task.sessionFile),
+  );
+}
 
 type ActiveChild = {
   taskId: string;
@@ -454,7 +460,7 @@ export function createFusionExtension(pi: ExtensionAPI, dependencies: FusionRunt
   const detectZellij = dependencies.checkZellij ?? checkZellij;
   const getParentPaneId = dependencies.resolveParentPaneId ?? resolveParentPaneId;
   const generation = beginLifecycle();
-  const tasks = new Map<string, Task>();
+  const tasks = new Map<string, ChildTask>();
   let modelOverride: string | undefined;
   let parentSessionKey: string | undefined;
   let disposed = false;
@@ -516,7 +522,6 @@ export function createFusionExtension(pi: ExtensionAPI, dependencies: FusionRunt
         if (!current()) return;
         task.cleanupPending = state.pending;
         task.cleanupError = state.errorMessage;
-        if (!state.pending && task.resumeAfterCleanup) task.validForFollowUp = true;
       });
     } finally {
       if (task.activeRun?.runId === runId) delete task.activeRun;
@@ -529,16 +534,8 @@ export function createFusionExtension(pi: ExtensionAPI, dependencies: FusionRunt
     task.cleanupPending = result.cleanupPending;
     task.cleanupError = result.errorMessage;
     if (result.sessionFile && path.resolve(result.sessionFile) !== path.resolve(task.sessionFile)) {
-      task.validForFollowUp = false;
-      task.resumeAfterCleanup = false;
       task.cleanupError = `Child runner returned an unexpected session file: ${result.sessionFile}`;
     }
-    // A complete cursor and a matching session file are required. This keeps
-    // malformed or partial records from being resumed unsafely.
-    const exactSession = !result.sessionFile || path.resolve(result.sessionFile) === path.resolve(task.sessionFile);
-    task.resumeAfterCleanup = exactSession && result.taskValid && Boolean(result.sessionFile && result.cursor);
-    task.validForFollowUp = task.resumeAfterCleanup && !result.cleanupPending;
-    task.status = result.status;
     task.lastRun = result;
     // The process-global session ledger owns cost attribution.
     onUpdate?.({ content: [{ type: "text", text: `Child ${task.id}: ${result.status}` }], details: {} });
@@ -655,10 +652,10 @@ export function createFusionExtension(pi: ExtensionAPI, dependencies: FusionRunt
         childSessionId: sessionId,
       });
       const task: ChildTask = {
-        kind: "child", id: taskId, sessionId, sessionDir, sessionFile, parentSessionFile, cwd: ctx.cwd, artifactRoot: root,
+        id: taskId, sessionId, sessionDir, sessionFile, parentSessionFile, cwd: ctx.cwd, artifactRoot: root,
         model: modelInput(resolved.model, resolved.thinkingLevel), tools: [...tools], extensions: [...extensions],
         childRuntimePath: childRuntimePath(), timeoutMs: cfg.timeoutMinutes * 60_000,
-        parentSessionKey, validForFollowUp: true,
+        parentSessionKey,
       };
       tasks.set(task.id, task);
       onUpdate?.({ content: [{ type: "text", text: `Starting child sidekick ${task.id} in ${parentPaneId}...` }], details: {} });
@@ -684,8 +681,10 @@ export function createFusionExtension(pi: ExtensionAPI, dependencies: FusionRunt
         throw new Error(`Unknown task_id "${params.task_id}". Live tasks: ${known}. Use delegate to start a new task.`);
       }
       if (task.activeRun) throw new Error(`Task "${task.id}" is busy with run "${task.activeRun.runId}".`);
-      if (task.cleanupPending) throw new Error(`Task "${task.id}" has unresolved child cleanup${task.cleanupError ? `: ${task.cleanupError}` : ""}.`);
-      if (!task.validForFollowUp || !task.sessionFile || !task.lastRun?.cursor) {
+      if (!followUpIsValid(task)) {
+        if (task.cleanupPending) {
+          throw new Error(`Task "${task.id}" has unresolved child cleanup${task.cleanupError ? `: ${task.cleanupError}` : ""}.`);
+        }
         throw new Error(`Task "${task.id}" cannot resume because its session record is missing or invalid.`);
       }
       const detection = await detectZellij(process.env);
@@ -700,7 +699,7 @@ export function createFusionExtension(pi: ExtensionAPI, dependencies: FusionRunt
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (error instanceof SessionIntegrityError || /saved child session|session prefix|session cursor/i.test(message)) {
-          task.validForFollowUp = false;
+          if (task.lastRun) task.lastRun = { ...task.lastRun, taskValid: false, cursor: undefined };
         }
         throw error;
       }

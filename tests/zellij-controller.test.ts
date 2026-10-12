@@ -111,21 +111,6 @@ test("FP-07/Unit: WHEN focus restore fails after a terminal is created, SHALL pr
   });
 });
 
-test("FP-03 Unit: WHEN sending a script, THEN its quoted path is targeted explicitly", async () => {
-  const h = harness([]);
-  await new ZellijController(h.execute).sendCommand({ paneId: "terminal_4", parentPaneId: "terminal_1" }, "/tmp/a file's.sh");
-  assert.deepEqual(h.calls, [
-    ["action", "write-chars", "--pane-id", "terminal_4", "'/tmp/a file'\\''s.sh'"],
-    ["action", "write", "--pane-id", "terminal_4", "13"],
-  ]);
-});
-
-test("FP-03 Unit: WHEN IDs are invalid, THEN no command is sent", async () => {
-  const h = harness([]);
-  await assert.rejects(() => new ZellijController(h.execute).sendCommand({ paneId: "plugin_4", parentPaneId: "terminal_1" }, "/tmp/x"), /Invalid terminal/);
-  assert.equal(h.calls.length, 0);
-});
-
 test("FP-16 Unit: WHEN a plugin and terminal share an ID, THEN only the terminal is live", async () => {
   const h = harness([{
     stdout: JSON.stringify([
@@ -239,10 +224,4 @@ test("FP-17 Unit: WHEN a verified retained pane remains after close failure, THE
     ["action", "close-pane", "--pane-id", "terminal_4"],
     ["action", "list-panes", "--json", "--all"],
   ]);
-});
-
-test("FP-03 Unit: WHEN screen is requested, THEN dump-screen targets the pane", async () => {
-  const h = harness([{ stdout: "screen", stderr: "" }]);
-  assert.equal(await new ZellijController(h.execute).screen({ paneId: "terminal_4", parentPaneId: "terminal_1" }, true), "screen");
-  assert.deepEqual(h.calls[0], ["action", "dump-screen", "--pane-id", "terminal_4", "--full"]);
 });

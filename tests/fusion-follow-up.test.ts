@@ -79,10 +79,6 @@ function commandHarness(options: { custom?: (factory: any) => Promise<string | u
   return { ...harness, selectors, notifications, command: harness.commands.get("fusion-model") };
 }
 
-test("FUSION-CMD-01: registers fusion-model", () => {
-  assert.ok(commandHarness().command);
-});
-
 test("FUSION-CMD-02: persists complete argument", async () => {
   const h = commandHarness();
   await h.command.handler("offline/fixture:medium", h.context);

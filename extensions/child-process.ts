@@ -1,5 +1,4 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
@@ -83,8 +82,6 @@ export interface RunControl {
   isPaneAlive?: () => Promise<boolean>;
   /** Test and integration seam for process probes. */
   probeChild?: () => Promise<"alive" | "gone" | "stale-identity">;
-  /** Legacy seam for callers that only have a liveness query. */
-  isChildAlive?: () => Promise<boolean>;
   queryIntervalMs?: number;
   /** Time to allow a child to flush its exit sidecar after it disappears. */
   flushGraceMs?: number;
@@ -232,9 +229,7 @@ export async function pollRun(control: RunControl): Promise<PollOutcome> {
     try {
       const state = control.probeChild
         ? await control.probeChild()
-        : control.isChildAlive
-          ? ((await control.isChildAlive()) ? "alive" : "gone")
-          : await defaultProbeChild(control.pidPath, control.runId);
+        : await defaultProbeChild(control.pidPath, control.runId);
       if (state !== "alive") {
         disappearanceAt ??= Date.now();
         disappearanceReason = state;
@@ -512,12 +507,6 @@ export function createLaunchSpec(spec: ChildLaunchSpec): { executable: string; a
     // Never snapshot credentials or ZELLIJ_PANE_ID in the parent process.
     env: { PI_FUSION_CHILD: "1", PI_FUSION_TASK_ID: spec.taskId, PI_FUSION_RUN_ID: spec.runId, PI_FUSION_TOOLS: spec.tools.join(","), ...(spec.holdFailurePane ? { PI_FUSION_HOLD_FAILURE: "1" } : {}) },
   };
-}
-
-export function defaultArtifactRoot(): string {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fusion-"));
-  fs.chmodSync(root, 0o700);
-  return root;
 }
 
 export {

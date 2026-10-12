@@ -33,7 +33,7 @@ pi
 
 Run `delegate` from that Pi session. Fusion checks the Zellij environment marker, the `zellij` executable, and the host pane ID before it creates a task. The numeric pane ID `0` is valid. If the marker or executable is missing, or if `ZELLIJ_PANE_ID` is missing or invalid, Fusion returns setup guidance and does not create a child.
 
-Fusion was tested with Pi 1.1.0 and Zellij 0.45.1. The current child launch protocol requires Linux because it records Linux `/proc` process identity before startup. It aborts child launch on other operating systems. Fusion does not claim macOS or Windows child-launch support. It uses these public Zellij actions: `list-panes`, `new-pane`, `new-tab`, `write-chars`, `write`, `send-keys`, `dump-screen`, `focus-pane-id`, and `close-pane`. A different Zellij version can change these commands or their output.
+Fusion was tested with Pi 1.1.0 and Zellij 0.45.1. The current child launch protocol requires Linux because it records Linux `/proc` process identity before startup. It aborts child launch on other operating systems. Fusion does not claim macOS or Windows child-launch support. It uses these public Zellij actions: `list-panes`, `new-pane`, `new-tab`, `send-keys`, `focus-pane-id`, and `close-pane`. A different Zellij version can change these commands or their output.
 
 ## Delegate lifecycle
 

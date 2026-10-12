@@ -8,7 +8,7 @@ import { ZellijController, type ZellijSurface } from "../../extensions/zellij.ts
 import { runChildTask } from "../../extensions/child-runner.ts";
 import { readIncrementalResult } from "../../extensions/session-parser.ts";
 import { seedChildSessionFile } from "../../extensions/session-lineage.ts";
-import { realZellijAvailability, focusPane, listPanes, makeExecutable, temporaryRoot, waitForFile } from "../real-harness.ts";
+import { realZellijAvailability, focusPane, listPanes, temporaryRoot, waitForFile } from "../real-harness.ts";
 
 const fixture = path.resolve("tests/fixtures/offline-provider.ts");
 const childRuntime = path.resolve("extensions/child-runtime.ts");
@@ -26,7 +26,7 @@ async function closeOwned(controller: ZellijController, surfaces: ZellijSurface[
   }
 }
 
-test("FP09-04 Integration: WHEN real Zellij surfaces are created, THEN explicit targeting, focus, placement, command delivery, interruption, and cleanup SHALL work", { skip, timeout: 45_000 }, async () => {
+test("FP09-04 Integration: WHEN real Zellij surfaces are created, THEN explicit targeting, focus, placement, interruption, and cleanup SHALL work", { skip, timeout: 45_000 }, async () => {
   const parent = availability.parentPaneId!;
   const root = temporaryRoot("surfaces");
   const controller = new ZellijController();
@@ -55,15 +55,6 @@ test("FP09-04 Integration: WHEN real Zellij surfaces are created, THEN explicit 
     owned.push(...concurrent);
     assert.notEqual(concurrent[0].paneId, concurrent[1].paneId);
     await assertFocused(parent);
-
-    const marker = path.join(root, "long-command.marker");
-    const longScript = path.join(root, "command's $long;value.sh");
-    makeExecutable(longScript, `#!/bin/sh\nprintf '%s' 'FP09-LONG-$HOME-$(printf no-expand)-semicolon;metachar' > ${JSON.stringify(marker)}\nsleep 30\n`);
-    const commandSurface = await controller.createSurface({ parentPaneId: parent, placement: { kind: "split", direction: "right" }, command: ["sh"] });
-    owned.push(commandSurface);
-    await controller.sendCommand(commandSurface, longScript);
-    await waitForFile(marker);
-    assert.match(await controller.screen(commandSurface, true), /command/);
 
     const interrupted = path.join(root, "interrupted.marker");
     const interruptSurface = await controller.createSurface({ parentPaneId: parent, placement: { kind: "split", direction: "right" }, command: ["sh", "-c", `trap 'printf interrupted > ${interrupted}; exit 0' INT; sleep 30`] });

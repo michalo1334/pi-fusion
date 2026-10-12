@@ -15,13 +15,11 @@ test("allows the default-safe context-mode tools with an exact allowlist", () =>
   const tools = [
     "ctx_execute", "ctx_execute_file", "ctx_index", "ctx_search", "ctx_fetch_and_index", "ctx_batch_execute", "ctx_stats", "ctx_doctor",
   ];
-  assert.strictEqual(selectedSidekickTools(tools, ["context-mode"]), tools);
   assert.deepEqual(selectedSidekickTools(tools, ["context-mode"]), tools);
 });
 
 test("allows sensitive context-mode tools only when explicitly configured", () => {
   const tools = ["ctx_upgrade", "ctx_purge"];
-  assert.strictEqual(selectedSidekickTools(tools, ["context-mode"]), tools);
   assert.deepEqual(selectedSidekickTools(tools, ["context-mode"]), tools);
 });
 
@@ -41,7 +39,6 @@ test("rejects unsupported sidekick tool names", () => {
 
 test("does not add extension tools to an explicit allowlist", () => {
   const tools = ["read"];
-  assert.strictEqual(selectedSidekickTools(tools, []), tools);
   assert.deepEqual(selectedSidekickTools(tools, []), ["read"]);
 });
 

@@ -11,6 +11,9 @@ import type { ZellijOperations, ZellijSurface } from "../extensions/zellij.ts";
 const temp = () => fs.mkdtempSync(path.join(os.tmpdir(), "fp07-runner-"));
 const model = { provider: "offline", id: "fixture", thinking: "off" };
 const surface: ZellijSurface = { paneId: "terminal_2", parentPaneId: "terminal_1" };
+const defaultZellijOperations = {
+  closeRetainedSurface: async () => "not-found-or-unowned" as const,
+};
 
 function findArtifacts(root: string, runId?: string): RunArtifacts {
   const task = fs.readdirSync(root).find((name) => name !== "session")!;
@@ -43,6 +46,7 @@ async function runFake(options: { complete?: boolean; partial?: boolean; disappe
   const runId = randomUUID();
   let alive = true;
   const controller: ZellijOperations & { closeCount: number; interruptCount: number; command?: readonly string[] } = {
+    ...defaultZellijOperations,
     closeCount: 0, interruptCount: 0,
     createSurface: async (input) => {
       controller.command = input.command;
@@ -55,11 +59,9 @@ async function runFake(options: { complete?: boolean; partial?: boolean; disappe
       }
       return surface;
     },
-    sendCommand: async () => {},
     interrupt: async () => { controller.interruptCount++; alive = false; },
     close: async () => { controller.closeCount++; alive = false; },
     paneExists: async () => alive,
-    screen: async () => "",
   };
   const result = await runChildTask({
     taskId: randomUUID(), runId, cwd: root, artifactRoot: root, sessionDir, sessionId: "session", model,
@@ -116,10 +118,10 @@ test("FP-07/Integration: WHEN timeout follows billed assistant output, SHALL pre
 
 test("FP-07/Unit: WHEN pane interruption fails, SHALL return the termination error and retain the run", async () => {
   const root = temp();
-  const controller: ZellijOperations = {
-    createSurface: async () => surface, sendCommand: async () => {},
+  const controller: ZellijOperations = { ...defaultZellijOperations,
+    createSurface: async () => surface,
     interrupt: async () => { throw new Error("interrupt denied"); }, close: async () => {},
-    paneExists: async () => false, screen: async () => "",
+    paneExists: async () => false,
   };
   const result = await runChildTask({
     taskId: randomUUID(), runId: randomUUID(), cwd: root, artifactRoot: root, sessionDir: path.join(root, "session"), sessionId: "session", model,
@@ -133,9 +135,9 @@ test("FP-07/Unit: WHEN pane interruption fails, SHALL return the termination err
 test("FP-07/Unit: WHEN the owned PID fingerprint is invalid, SHALL report the stop failure", async () => {
   const root = temp();
   const runId = randomUUID();
-  const controller: ZellijOperations = {
+  const controller: ZellijOperations = { ...defaultZellijOperations,
     createSurface: async () => { const artifacts = findArtifacts(root); fs.writeFileSync(artifacts.pidPath, JSON.stringify({ runId, pid: 99999 }) + "\n"); return surface; },
-    sendCommand: async () => {}, interrupt: async () => {}, close: async () => {}, paneExists: async () => false, screen: async () => "",
+    interrupt: async () => {}, close: async () => {}, paneExists: async () => false,
   };
   const result = await runChildTask({
     taskId: randomUUID(), runId, cwd: root, artifactRoot: root, sessionDir: path.join(root, "session"), sessionId: "session", model,
@@ -157,10 +159,10 @@ test("FP-07/Integration: WHEN cancellation arrives during delayed surface creati
   const sessionDir = path.join(root, "session");
   const abort = new AbortController();
   let creates = 0;
-  const controller: ZellijOperations = {
+  const controller: ZellijOperations = { ...defaultZellijOperations,
     createSurface: async () => { creates++; await new Promise((resolve) => setTimeout(resolve, 30)); return surface; },
-    sendCommand: async () => {}, interrupt: async () => {}, close: async () => {},
-    paneExists: async () => true, screen: async () => "",
+    interrupt: async () => {}, close: async () => {},
+    paneExists: async () => true,
   };
   setTimeout(() => abort.abort(), 5);
   const result = await runChildTask({
@@ -177,9 +179,9 @@ test("FP-07/Integration: WHEN cancellation arrives before a delayed PID beyond t
   const root = temp();
   const abort = new AbortController();
   let interrupted = 0;
-  const controller: ZellijOperations = {
-    createSurface: async () => surface, sendCommand: async () => {},
-    interrupt: async () => { interrupted++; }, close: async () => {}, paneExists: async () => true, screen: async () => "",
+  const controller: ZellijOperations = { ...defaultZellijOperations,
+    createSurface: async () => surface,
+    interrupt: async () => { interrupted++; }, close: async () => {}, paneExists: async () => true,
   };
   const resultPromise = runChildTask({
     taskId: randomUUID(), runId: randomUUID(), cwd: root, artifactRoot: root, sessionDir: path.join(root, "session"), sessionId: "session", model,
@@ -198,7 +200,7 @@ test("FP-08/Integration: WHEN follow-up starts, THE runner SHALL resume the same
   const sessionDir = path.join(root, "session");
   const taskId = randomUUID();
   let createCount = 0;
-  const controller: ZellijOperations = {
+  const controller: ZellijOperations = { ...defaultZellijOperations,
     createSurface: async () => {
       createCount += 1;
       const runId = createCount === 1 ? firstRunId : secondRunId;
@@ -214,7 +216,7 @@ test("FP-08/Integration: WHEN follow-up starts, THE runner SHALL resume the same
       writeExitSidecar(artifacts.exitPath, { runId, exitCode: 0, finishedAt: new Date().toISOString() });
       return { paneId: `terminal_${createCount + 1}`, parentPaneId: "terminal_1" };
     },
-    sendCommand: async () => {}, interrupt: async () => {}, close: async () => {}, paneExists: async () => true, screen: async () => "",
+    interrupt: async () => {}, close: async () => {}, paneExists: async () => true,
   };
   const firstRunId = randomUUID();
   const secondRunId = randomUUID();
@@ -244,7 +246,7 @@ test("FP-08/Integration: WHEN the previous child turn fails with a provider erro
   const firstRunId = randomUUID();
   const secondRunId = randomUUID();
   let createCount = 0;
-  const controller: ZellijOperations = {
+  const controller: ZellijOperations = { ...defaultZellijOperations,
     createSurface: async () => {
       createCount += 1;
       const runId = createCount === 1 ? firstRunId : secondRunId;
@@ -264,7 +266,7 @@ test("FP-08/Integration: WHEN the previous child turn fails with a provider erro
       }
       return { paneId: `terminal_${createCount + 2}`, parentPaneId: "terminal_1" };
     },
-    sendCommand: async () => {}, interrupt: async () => {}, close: async () => {}, paneExists: async () => true, screen: async () => "",
+    interrupt: async () => {}, close: async () => {}, paneExists: async () => true,
   };
   const input = (runId: string) => ({ taskId, runId, cwd: root, artifactRoot: root, sessionDir, sessionId: "session", model,
     tools: ["read"], extensions: [], childRuntimePath: path.join(root, "runtime"), systemPrompt: "system", prompt: "retry", parentPaneId: "terminal_1", timeoutMs: 200 });
@@ -283,9 +285,8 @@ test("FP-08/Integration: WHEN termination fails, THE runner SHALL retain cleanup
   let artifacts!: RunArtifacts;
   let interrupts = 0;
   let closes = 0;
-  const controller: ZellijOperations = {
+  const controller: ZellijOperations = { ...defaultZellijOperations,
     createSurface: async () => { artifacts = findArtifacts(root, runId); return surface; },
-    sendCommand: async () => {},
     interrupt: async () => {
       interrupts += 1;
       if (interrupts === 1) throw new Error("termination denied");
@@ -293,7 +294,6 @@ test("FP-08/Integration: WHEN termination fails, THE runner SHALL retain cleanup
     },
     close: async () => { closes += 1; },
     paneExists: async () => false,
-    screen: async () => "",
   };
   const result = await runChildTask({
     taskId: randomUUID(), runId, cwd: root, artifactRoot: root, sessionDir: path.join(root, "session"), sessionId: "session", model,
@@ -315,10 +315,10 @@ test("FP-17 Unit: WHEN a valid follow-up has a retained failed pane, THEN it ver
   const sessionDir = path.join(root, "session");
   writeSession(sessionDir, "session", "first report");
   const events: string[] = [];
-  const controller: ZellijOperations = {
+  const controller: ZellijOperations = { ...defaultZellijOperations,
     closeRetainedSurface: async () => { events.push("close-retained"); return "closed"; },
     createSurface: async () => { events.push("create"); throw new Error("stop after order check"); },
-    sendCommand: async () => {}, interrupt: async () => {}, close: async () => {}, paneExists: async () => false, screen: async () => "",
+    interrupt: async () => {}, close: async () => {}, paneExists: async () => false,
   };
   const outcome = await runChildTask({
     taskId: randomUUID(), runId: randomUUID(), cwd: root, artifactRoot: root, sessionDir, sessionId: "session",
@@ -331,10 +331,10 @@ test("FP-17 Unit: WHEN a valid follow-up has a retained failed pane, THEN it ver
   assert.deepEqual(events, ["close-retained", "create"]);
 
   const fallbackEvents: string[] = [];
-  const missingController: ZellijOperations = {
+  const missingController: ZellijOperations = { ...defaultZellijOperations,
     closeRetainedSurface: async () => { fallbackEvents.push("lookup"); return "not-found-or-unowned"; },
     createSurface: async () => { fallbackEvents.push("create"); throw new Error("missing pane fallback checked"); },
-    sendCommand: async () => {}, interrupt: async () => {}, close: async () => {}, paneExists: async () => false, screen: async () => "",
+    interrupt: async () => {}, close: async () => {}, paneExists: async () => false,
   };
   const fallback = await runChildTask({
     taskId: randomUUID(), runId: randomUUID(), cwd: root, artifactRoot: root, sessionDir, sessionId: "session",
@@ -356,10 +356,10 @@ test("FP-17 Unit: WHEN retained-pane close fails before creation, THEN it reject
   let sleeps = 0;
   const abort = new AbortController();
   const runId = randomUUID();
-  const controller: ZellijOperations = {
+  const controller: ZellijOperations = { ...defaultZellijOperations,
     closeRetainedSurface: async () => { throw new Error("Verified retained pane terminal_2 could not close: close denied"); },
     createSurface: async () => { creates++; return surface; },
-    sendCommand: async () => {}, interrupt: async () => { interrupts++; }, close: async () => {}, paneExists: async () => false, screen: async () => "",
+    interrupt: async () => { interrupts++; }, close: async () => {}, paneExists: async () => false,
   };
   await assert.rejects(() => runChildTask({
     taskId: "close-failure", runId, cwd: root, artifactRoot: root, sessionDir, sessionId: "session",
@@ -383,10 +383,10 @@ test("FP-17 Unit: WHEN retained-pane close fails before creation, THEN it reject
 test("FP-17 Unit: WHEN a launch is fresh, or the session or signal is invalid, THEN it does not close a retained pane", async () => {
   const root = temp();
   let retainedCloses = 0;
-  const controller: ZellijOperations = {
+  const controller: ZellijOperations = { ...defaultZellijOperations,
     closeRetainedSurface: async () => { retainedCloses++; return "closed"; },
     createSurface: async () => { throw new Error("fresh launch checked"); },
-    sendCommand: async () => {}, interrupt: async () => {}, close: async () => {}, paneExists: async () => false, screen: async () => "",
+    interrupt: async () => {}, close: async () => {}, paneExists: async () => false,
   };
   const base = {
     taskId: randomUUID(), runId: randomUUID(), cwd: root, artifactRoot: root, sessionDir: path.join(root, "session"), sessionId: "session",
@@ -413,14 +413,14 @@ test("FP-07/Integration: WHEN cancellation arrives during result parsing, SHALL 
   const sessionDir = path.join(root, "session");
   const abort = new AbortController();
   const runId = randomUUID();
-  const controller: ZellijOperations = {
+  const controller: ZellijOperations = { ...defaultZellijOperations,
     createSurface: async () => {
       const artifacts = findArtifacts(root);
       writeSession(sessionDir, "session", "child report");
       writeExitSidecar(artifacts.exitPath, { runId, exitCode: 0, finishedAt: new Date().toISOString() });
       return surface;
-    }, sendCommand: async () => {}, interrupt: async () => {}, close: async () => { throw new Error("must not close"); },
-    paneExists: async () => true, screen: async () => "",
+    }, interrupt: async () => {}, close: async () => { throw new Error("must not close"); },
+    paneExists: async () => true,
   };
   let findCalls = 0;
   const result = await runChildTask({

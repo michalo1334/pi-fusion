@@ -22,7 +22,6 @@ import {
   type Detection,
   type ZellijOperations,
   type ZellijSurface,
-  type RetainedSurfaceCloseResult,
   ZellijController,
 } from "./zellij.ts";
 
@@ -309,7 +308,6 @@ export async function runChildTask(
   let surface: ZellijSurface | undefined;
   let stopStarted = false;
   let closeStarted = false;
-  let finalized = false;
   let stopError: string | undefined;
   let cleanupPending = false;
 
@@ -389,7 +387,6 @@ export async function runChildTask(
   try {
     if (cancellationRequested) {
       const evidence = await readAvailableEvidence(input, preRunCursor, findSessionFile, sleep);
-      finalized = true;
       return baseResult("aborted", evidence, joinErrors(cancellationError, await stopChild()));
     }
     // The saved session and cursor were validated above. Query ownership at the
@@ -397,22 +394,17 @@ export async function runChildTask(
     // Zellij may reuse terminal IDs after a retained pane disappears. This is
     // outside the new-run catch because close failure belongs to the old pane.
     if (input.requireExistingSession && input.retainedFailureSurface) {
-      if (!controller.closeRetainedSurface) {
-        throw new Error("Zellij controller cannot verify and close the retained failure pane");
-      }
-      const retained: RetainedSurfaceCloseResult = await controller.closeRetainedSurface({
+      const retained = await controller.closeRetainedSurface({
         ...input.retainedFailureSurface,
         isCancelled: () => cancellationRequested || Boolean(input.signal?.aborted),
       });
       if (retained === "cancelled") {
         const evidence = await readAvailableEvidence(input, preRunCursor, findSessionFile, sleep);
-        finalized = true;
         return baseResult("aborted", evidence, joinErrors(cancellationError, await stopChild()));
       }
     }
     if (cancellationRequested) {
       const evidence = await readAvailableEvidence(input, preRunCursor, findSessionFile, sleep);
-      finalized = true;
       return baseResult("aborted", evidence, joinErrors(cancellationError, await stopChild()));
     }
 
@@ -422,7 +414,6 @@ export async function runChildTask(
       const command = createLaunchCommand(launchSpec, artifacts);
       if (cancellationRequested) {
         const evidence = await readAvailableEvidence(input, preRunCursor, findSessionFile, sleep);
-        finalized = true;
         return baseResult("aborted", evidence, joinErrors(cancellationError, await stopChild()));
       }
 
@@ -445,7 +436,6 @@ export async function runChildTask(
         if (partial?.surface) surface = partial.surface;
         const stopped = await stopChild();
         const evidence = await readAvailableEvidence(input, preRunCursor, findSessionFile, sleep);
-        finalized = true;
         return baseResult("error", evidence, joinErrors(errorText(error), stopped));
       }
 
@@ -463,7 +453,6 @@ export async function runChildTask(
         const evidence = await readAvailableEvidence(input, preRunCursor, findSessionFile, sleep);
         const status = abortObserved ? "aborted" : statusFromPoll(polled.kind);
         const reason = polled.kind === "query-error" ? polled.error.message : `Child run ${polled.kind}`;
-        finalized = true;
         return baseResult(status, evidence, joinErrors(reason, cancellationError, stopped));
       }
 
@@ -471,7 +460,6 @@ export async function runChildTask(
       const cancelledBeforeClose = abortObserved || input.signal?.aborted;
       if (cancelledBeforeClose) {
         const stopped = await stopChild();
-        finalized = true;
         return baseResult("aborted", evidence, stopped);
       }
       const parsedStatus: ChildRunStatus = evidence.outcome === "aborted"
@@ -483,7 +471,6 @@ export async function runChildTask(
         ? await closeSurface()
         : undefined;
       const finalStatus = closeError ? "error" : parsedStatus;
-      finalized = true;
       return baseResult(finalStatus, evidence, joinErrors(closeError?.message, cancellationError, polled.record.error));
     } catch (error) {
       const partial = error && typeof error === "object" && "partial" in error
@@ -492,15 +479,10 @@ export async function runChildTask(
       if (partial?.surface) surface = partial.surface;
       const stopped = await stopChild();
       const evidence = await readAvailableEvidence(input, preRunCursor, findSessionFile, sleep);
-      finalized = true;
       return baseResult(abortObserved || input.signal?.aborted ? "aborted" : "error", evidence, joinErrors(errorText(error), cancellationError, stopped));
     }
   } finally {
     input.signal?.removeEventListener("abort", onAbort);
-    // `finalized` is intentionally local to this one terminal path. The flag
-    // documents the invariant and prevents future cleanup additions from
-    // introducing a second result path.
-    void finalized;
   }
 }
 

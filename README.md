@@ -78,7 +78,7 @@ The safe child-PID protocol uses Linux `/proc/<pid>/stat` identity data. Safe nu
 
 - **No active Zellij or missing executable:** Start `zellij`, then start Pi inside it. Check that the `zellij` executable is on `PATH`.
 - **Missing or invalid parent pane ID:** Start Pi from the Zellij pane that should own the child. A numeric `ZELLIJ_PANE_ID` is required; `0` is valid. Do not set a pane ID from another session.
-- **Selected model is unavailable:** The lead must resolve the provider and model before it creates a task. Check the provider setup, or run `/fusion-model` and select an available model. A model change applies to a new `delegate`; a follow-up keeps the original model.
+- **Selected model is unavailable:** The lead must resolve the provider and model before it creates a task. Check the provider setup, or run `/fusion-model` and select an available model. A model change applies to later `delegate` and `follow_up` launches. It does not change a child that is already running.
 - **Child policy readiness failure:** The child disables tools first, waits briefly for selected extensions to register, and then checks the exact requested tool names. A missing tool, recursive Fusion tool, or readiness timeout fails before the model turn and leaves the pane and `runtime-error.json` available for inspection. A missing selected extension fails before child pane creation.
 - **Lost pane:** If the user closes the child pane, Fusion reports a surface-loss error. The child session may still be usable only if the returned session evidence is complete. Do not assume that screen text proves completion.
 - **Session integrity error:** A truncated, replaced, or rewritten session file cannot be resumed. Start a new task with `delegate`.
@@ -120,7 +120,37 @@ The public configuration values are:
 - `sidekickTools`: exact tool names passed to the child policy.
 - `sidekickExtensions`: supported explicit extension IDs.
 
-`PI_FUSION_MODEL` overrides the model in settings. `/fusion-model` overrides that value for the current Pi process. The slash command uses the lead model registry, so the selected model must be available there. Settings and overrides affect new `delegate` calls. A follow-up keeps the original model, tools, extensions, working directory, and timeout.
+### Change the Fusion default
+
+Use this command:
+
+```text
+/fusion-model [provider/model[:thinking]]
+```
+
+The command uses the lead Pi model registry. The selected model must be available there.
+
+- With no argument, the command opens the registered model selector and then a thinking-level selector.
+- With `provider/model`, the command validates the model and prompts for the thinking level.
+- With `provider/model:thinking`, the command validates and applies both values directly.
+
+The supported thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
+
+For example, `/fusion-model openai/gpt-5:high` selects a model and thinking level in one command.
+
+Fusion saves the normalized value as `provider/model:thinking` in the project file `.pi/settings.json` under `fusion.sidekickModel`. The command writes the file before it changes the current session value. A failed write leaves the current session value unchanged. A cancelled selector, invalid model, invalid thinking level, malformed settings file, or other persistence error does not overwrite the file or change the runtime value.
+
+Fusion resolves the default in this order for each child launch:
+
+1. A successful `/fusion-model` selection in the current session.
+2. `PI_FUSION_MODEL`.
+3. The project value in `.pi/settings.json`.
+4. The user-level Pi settings value.
+5. The package fallback.
+
+A Pi restart clears the session selection. The normal environment, project, global, and fallback order then applies. Therefore, `PI_FUSION_MODEL` can temporarily take priority over the persisted project value after a restart.
+
+New `delegate` calls resolve the latest successful model and thinking selection immediately before launch. `follow_up` calls do the same. They do not reuse the model captured by the earlier run. A running child keeps its current model and thinking level. Fusion starts child launches from the parent's current working directory. A follow-up keeps the saved child session and its working directory.
 
 ## Cost accounting
 

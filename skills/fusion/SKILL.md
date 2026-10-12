@@ -11,6 +11,28 @@ ambiguity, the final review, the commit.
 - The sidekick reads `AGENTS.md`.
 - Use `follow_up` before Pi restarts. A `task_id` does not survive a restart.
 
+## Select the Fusion default
+
+Use `/fusion-model [provider/model[:thinking]]` to change the default for later child launches.
+
+- With no argument, open the registered model selector, then the thinking-level selector.
+- With `provider/model`, validate the model and prompt for the thinking level.
+- With `provider/model:thinking`, validate and apply both values directly.
+
+Supported thinking levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
+
+The command saves the normalized value as `provider/model:thinking` in the project `.pi/settings.json` file under `fusion.sidekickModel`. It persists the file before it changes the session runtime value. A cancelled selector, invalid model, invalid thinking level, malformed settings file, or failed write leaves the previous file and runtime value unchanged.
+
+Resolve the default in this order:
+
+1. A successful selection in the current session.
+2. `PI_FUSION_MODEL`.
+3. The project `.pi/settings.json` value.
+4. The global Pi settings value.
+5. The package fallback.
+
+A restart clears the current-session selection. Later resolution then uses the environment, project, global, and fallback values. New `delegate` calls and `follow_up` calls use the latest successful model and thinking selection. A child that is already running does not change. Fusion launches children from the parent's current working directory and keeps that directory for follow-ups.
+
 ## Delegate early, by default
 
 - Take minimal reconnaissance actions, then hand off the entire implement → test → lint loop in ONE `delegate` brief.

@@ -32,7 +32,7 @@ Resolve the default in this order:
 4. The global Pi settings value.
 5. The package fallback.
 
-A restart clears the current-session selection. Later resolution then uses the environment, project, global, and fallback values. New `delegate` calls and `follow_up` calls use the latest successful model and thinking selection. A child that is already running does not change. Fusion launches children from the parent's current working directory and keeps that directory for follow-ups.
+A restart clears the current-session selection. Later resolution then uses the environment, project, global, and fallback values. New `delegate` calls use the latest successful model and thinking selection. `/fusion-model` does not change an existing task or its `follow_up` launches: a follow-up resumes the saved child session without provider, model, or thinking flags. Change the model inside that child session when needed. Fusion launches children from the parent's current working directory and keeps that directory for follow-ups.
 
 ## Delegate early, by default
 

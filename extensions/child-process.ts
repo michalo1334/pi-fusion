@@ -17,7 +17,10 @@ export interface ChildLaunchSpec {
   sessionId: string;
   /** Exact pre-seeded session file. Production launches must use this path. */
   sessionFile?: string;
-  model: { provider: string; id: string; thinking: string };
+  /** Required for fresh launches; resume launches use the saved session model. */
+  model?: { provider: string; id: string; thinking: string };
+  /** Resume the saved session without model-selection command-line flags. */
+  requireExistingSession?: boolean;
   tools: string[];
   extensions: string[];
   promptPath: string;
@@ -439,10 +442,18 @@ export function buildChildArgs(spec: ChildLaunchSpec): string[] {
   assertNoRecursiveFusionExtensions(spec.extensions);
   assertSafe(spec.runId, "runId");
   assertSafe(spec.sessionId, "sessionId");
-  if (!spec.model.provider || !spec.model.id || !spec.model.thinking) throw new Error("Complete model selection is required");
+  if (!spec.requireExistingSession && (!spec.model?.provider || !spec.model.id || !spec.model.thinking)) {
+    throw new Error("Complete model selection is required for a fresh child launch");
+  }
+  if (spec.requireExistingSession && !spec.sessionFile) {
+    throw new Error("A follow-up requires the exact saved child session file");
+  }
+  const modelArgs = spec.requireExistingSession
+    ? []
+    : ["--provider", spec.model!.provider, "--model", spec.model!.id, "--thinking", spec.model!.thinking];
   return [
     "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-mcp",
-    "--provider", spec.model.provider, "--model", spec.model.id, "--thinking", spec.model.thinking,
+    ...modelArgs,
     ...(spec.sessionFile ? ["--session", spec.sessionFile] : ["--session-dir", spec.sessionDir, "--session-id", spec.sessionId]),
     "--tools", spec.tools.join(","),
     "--append-system-prompt", spec.systemPromptPath,

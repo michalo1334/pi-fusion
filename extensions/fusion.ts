@@ -39,8 +39,13 @@ const SHORT_REPORT_CHARS = 200;
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const BUILTIN_SIDEKICK_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
 const MCP_SIDEKICK_TOOLS = ["mcp", "mcpScript", "mcp__blender_mcp", "mcp__svelte", "mcp__web_search"] as const;
-const DEFAULT_SIDEKICK_TOOLS = [...BUILTIN_SIDEKICK_TOOLS, ...MCP_SIDEKICK_TOOLS];
-const SUPPORTED_SIDEKICK_TOOLS = new Set<string>(DEFAULT_SIDEKICK_TOOLS);
+const CONTEXT_MODE_SAFE_SIDEKICK_TOOLS = [
+  "ctx_execute", "ctx_execute_file", "ctx_index", "ctx_search", "ctx_fetch_and_index", "ctx_batch_execute", "ctx_stats", "ctx_doctor",
+] as const;
+const CONTEXT_MODE_SENSITIVE_SIDEKICK_TOOLS = ["ctx_upgrade", "ctx_purge"] as const;
+const CONTEXT_MODE_SIDEKICK_TOOLS = [...CONTEXT_MODE_SAFE_SIDEKICK_TOOLS, ...CONTEXT_MODE_SENSITIVE_SIDEKICK_TOOLS] as const;
+const DEFAULT_SIDEKICK_TOOLS = [...BUILTIN_SIDEKICK_TOOLS, ...MCP_SIDEKICK_TOOLS, ...CONTEXT_MODE_SAFE_SIDEKICK_TOOLS];
+const SUPPORTED_SIDEKICK_TOOLS = new Set<string>([...DEFAULT_SIDEKICK_TOOLS, ...CONTEXT_MODE_SENSITIVE_SIDEKICK_TOOLS]);
 const SUPPORTED_SIDEKICK_EXTENSIONS = new Set(["pi-mcp-adapter", "context-mode"]);
 
 export const PREAMBLE = `You are a sidekick agent executing a task brief from a lead engineer.
@@ -351,6 +356,10 @@ export function selectedSidekickTools(tools: string[], extensionIds: string[]): 
   if (usesMcp && !extensionIds.includes("pi-mcp-adapter")) {
     throw new Error("fusion.sidekickTools includes MCP tools but fusion.sidekickExtensions omits pi-mcp-adapter");
   }
+  const usesContextMode = tools.some((tool) => CONTEXT_MODE_SIDEKICK_TOOLS.includes(tool as never));
+  if (usesContextMode && !extensionIds.includes("context-mode")) {
+    throw new Error("fusion.sidekickTools includes context-mode tools but fusion.sidekickExtensions omits context-mode");
+  }
   return tools;
 }
 
@@ -490,7 +499,7 @@ export function createFusionExtension(pi: ExtensionAPI, dependencies: FusionRunt
         sessionId: task.sessionId,
         sessionFile: task.sessionFile,
         parentSessionFile: task.parentSessionFile,
-        model: task.model,
+        ...(requireExistingSession ? {} : { model: task.model }),
         tools: task.tools,
         extensions: task.extensions,
         childRuntimePath: task.childRuntimePath,
@@ -682,14 +691,6 @@ export function createFusionExtension(pi: ExtensionAPI, dependencies: FusionRunt
       if (!detection.available || !parentPaneId) {
         throw new Error(detection.setupHint + (parentPaneId ? "" : " ZELLIJ_PANE_ID is missing from the host Pi environment."));
       }
-      // Resolve defaults at follow-up launch time. The task's model remains
-      // diagnostic history only; it must not become a stale default source.
-      const cfg = readConfig(ctx.cwd, modelOverride);
-      const resolved = resolveSidekickModel(ctx, cfg.sidekickModel);
-      if ("error" in resolved) {
-        throw new Error(`pi-fusion: cannot resolve sidekick model "${cfg.sidekickModel}": ${resolved.error}`);
-      }
-      task.model = modelInput(resolved.model, resolved.thinkingLevel);
       let result: ChildRunResult;
       try {
         result = await runTask(task, params.message, parentPaneId, task.timeoutMs, signal, true);

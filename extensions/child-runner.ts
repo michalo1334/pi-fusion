@@ -44,7 +44,8 @@ export interface ChildRunInput {
   sessionFile?: string;
   /** Authoritative lead session file used to validate child lineage. */
   parentSessionFile?: string;
-  model: ChildModel;
+  /** Required for a fresh launch; resumed sessions retain their saved model. */
+  model?: ChildModel;
   tools: string[];
   extensions: string[];
   childRuntimePath: string;
@@ -230,8 +231,14 @@ export async function runChildTask(
   input: ChildRunInput,
   dependencies: ChildRunnerDependencies = {},
 ): Promise<ChildRunResult> {
-  // This check must happen before UUID artifacts, wrappers, or pane creation.
+  // These checks must happen before UUID artifacts, wrappers, or pane creation.
   if (input.signal?.aborted) throw new Error("Child run was cancelled before allocation");
+  if (!input.requireExistingSession && (!input.model?.provider || !input.model.id || !input.model.thinking)) {
+    throw new Error("Complete model selection is required for a fresh child launch");
+  }
+  if (input.requireExistingSession && !input.sessionFile) {
+    throw new Error("A follow-up requires the exact saved child session file");
+  }
 
   const sleep = dependencies.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   if (input.parentSessionFile && !input.sessionFile) {
@@ -272,7 +279,7 @@ export async function runChildTask(
     sessionDir: input.sessionDir,
     sessionId: input.sessionId,
     sessionFile: input.sessionFile,
-    model: input.model,
+    ...(input.requireExistingSession ? { requireExistingSession: true } : { model: input.model }),
     tools: input.tools,
     extensions: input.extensions,
     promptPath: artifacts.promptPath,

@@ -31,6 +31,37 @@ test("FP-04/Architecture: SHALL reject recursive tools and extensions", () => {
   assert.throws(() => buildChildArgs({ ...spec, tools: ["read"], extensions: ["fusion"] }));
 });
 
+test("FP-04/Unit: fresh launches select a model while resumed sessions keep their saved model", () => {
+  const fresh = {
+    taskId: "task-1", runId: "run-1", cwd: "/work", artifactRoot: "/artifacts", sessionDir: "/sessions", sessionId: "session-1",
+    model: { provider: "provider", id: "model", thinking: "high" }, tools: ["read"], extensions: [],
+    promptPath: "/artifacts/prompt.md", systemPromptPath: "/artifacts/system.md", childRuntimePath: "/extensions/child-runtime.ts",
+  };
+  const freshArgs = buildChildArgs(fresh);
+  assert.deepEqual(
+    freshArgs.slice(freshArgs.indexOf("--provider"), freshArgs.indexOf("--provider") + 6),
+    ["--provider", "provider", "--model", "model", "--thinking", "high"],
+  );
+  assert.throws(
+    () => buildChildArgs({ ...fresh, model: undefined }),
+    /Complete model selection is required for a fresh child launch/,
+  );
+
+  const sessionFile = "/sessions/saved-session.jsonl";
+  assert.throws(
+    () => buildChildArgs({ ...fresh, model: undefined, requireExistingSession: true }),
+    /exact saved child session file/,
+  );
+  const resumedArgs = buildChildArgs({ ...fresh, model: undefined, requireExistingSession: true, sessionFile });
+  for (const flag of ["--provider", "--model", "--thinking"]) assert.equal(resumedArgs.includes(flag), false);
+  assert.deepEqual(
+    resumedArgs.slice(resumedArgs.indexOf("--session"), resumedArgs.indexOf("--session") + 2),
+    ["--session", sessionFile],
+  );
+  assert.equal(resumedArgs.includes("--session-dir"), false);
+  assert.equal(resumedArgs.includes("--session-id"), false);
+});
+
 test("FP-04/EARS: builds exact restricted CLI policy without prompt interpolation", () => {
   const args = buildChildArgs({
     taskId: "task-1", runId: "run-1", cwd: "/work", artifactRoot: "/artifacts",

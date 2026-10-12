@@ -162,7 +162,7 @@ test("FP09-02 Integration: WHEN a new generated child resumes the stored session
   const before = await readIncrementalResult(file, { byteOffset: 0 }, { processExited: true, exitStatus: { exitCode: 0 } });
   const secondRunId = `run-${randomUUID()}`;
   const secondArtifacts = runDirArtifacts(root, taskId, secondRunId);
-  const secondSpec = launchSpec(root, taskId, secondRunId, sessionDir, secondArtifacts);
+  const secondSpec = { ...launchSpec(root, taskId, secondRunId, sessionDir, secondArtifacts), sessionFile: file, model: undefined, requireExistingSession: true };
   createPromptArtifact(secondArtifacts.promptPath, "follow-up process prompt");
   createPromptArtifact(secondArtifacts.systemPromptPath, "system policy");
   const second = await runChild(secondSpec, secondArtifacts, { PI_FUSION_FIXTURE_EVIDENCE: evidencePath });
@@ -203,7 +203,12 @@ test("LINEAGE-03 Integration: WHEN two offline child processes run, THE exact --
   const cursor = captureSessionCursor(childFile);
   const secondRunId = `run-${randomUUID()}`;
   const secondArtifacts = runDirArtifacts(root, taskId, secondRunId);
-  const secondSpec = { ...launchSpec(root, taskId, secondRunId, sessionDir, secondArtifacts), sessionFile: childFile };
+  const secondSpec = {
+    ...launchSpec(root, taskId, secondRunId, sessionDir, secondArtifacts),
+    sessionFile: childFile,
+    model: undefined,
+    requireExistingSession: true,
+  };
   createPromptArtifact(secondArtifacts.promptPath, "lineage follow-up process");
   createPromptArtifact(secondArtifacts.systemPromptPath, "system policy");
   const second = await runChild(secondSpec, secondArtifacts, {});

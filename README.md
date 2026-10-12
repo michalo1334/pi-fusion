@@ -53,7 +53,7 @@ The tool blocks until the child settles or fails. It does not return an early ac
 
 ## Follow-up lifecycle
 
-`follow_up(task_id, message)` opens a new pane and resumes the same child session. It blocks until the new turn settles. It returns only the new report and the new usage. It does not charge or repeat the earlier run.
+`follow_up(task_id, message)` opens a new pane and resumes the same child session. It blocks until the new turn settles. It returns only the new report and the new usage. It does not charge or repeat the earlier run. It does not pass provider, model, or thinking flags, so the saved child session keeps its own model state. Change a follow-up model from inside that child session, not with the lead `/fusion-model` command.
 
 Task IDs and the task map exist only in the current parent Pi process and extension generation. A Pi restart or `/reload` invalidates old task IDs. Fusion does not reconstruct tasks after a restart. A follow-up also requires an intact saved session and cursor. A failed run can accept a follow-up only when Fusion reports that the session evidence remains valid and cleanup is complete.
 
@@ -78,7 +78,7 @@ The safe child-PID protocol uses Linux `/proc/<pid>/stat` identity data. Safe nu
 
 - **No active Zellij or missing executable:** Start `zellij`, then start Pi inside it. Check that the `zellij` executable is on `PATH`.
 - **Missing or invalid parent pane ID:** Start Pi from the Zellij pane that should own the child. A numeric `ZELLIJ_PANE_ID` is required; `0` is valid. Do not set a pane ID from another session.
-- **Selected model is unavailable:** The lead must resolve the provider and model before it creates a task. Check the provider setup, or run `/fusion-model` and select an available model. A model change applies to later `delegate` and `follow_up` launches. It does not change a child that is already running.
+- **Selected model is unavailable:** The lead must resolve the provider and model before it creates a new task. Check the provider setup, or run `/fusion-model` and select an available model. A model change applies only to later `delegate` launches. Follow-ups retain the saved child session model; change it inside that child session when needed.
 - **Child policy readiness failure:** The child disables tools first, waits briefly for selected extensions to register, and then checks the exact requested tool names. A missing tool, recursive Fusion tool, or readiness timeout fails before the model turn and leaves the pane and `runtime-error.json` available for inspection. A missing selected extension fails before child pane creation.
 - **Lost pane:** If the user closes the child pane, Fusion reports a surface-loss error. The child session may still be usable only if the returned session evidence is complete. Do not assume that screen text proves completion.
 - **Session integrity error:** A truncated, replaced, or rewritten session file cannot be resumed. Start a new task with `delegate`.
@@ -87,31 +87,41 @@ The safe child-PID protocol uses Linux `/proc/<pid>/stat` identity data. Safe nu
 
 ## Child resources and policy
 
-Fusion passes the selected provider, model, thinking level, and exact pre-seeded session file to the child. The child opens that file with `--session`, so follow-ups keep the same file and parent header. The parent applies the configured timeout to each child run. The child loads no discovered context files, skills, prompt templates, themes, or arbitrary project extensions. It loads only the child runtime and the explicitly selected extension paths. Fusion itself is excluded, so the child cannot call `delegate` or `follow_up`.
+Fusion passes the selected provider, model, and thinking level only to a fresh child, along with the exact pre-seeded session file. A follow-up opens that saved file with `--session` but deliberately omits provider, model, and thinking flags, preserving the child session's own model state and parent header. The parent applies the configured timeout to each child run. The child loads no discovered context files, skills, prompt templates, themes, or arbitrary project extensions. It loads only the child runtime and the explicitly selected extension paths. Fusion itself is excluded, so the child cannot call `delegate` or `follow_up`.
 
 `fusion.sidekickTools` is a tool-name allowlist. Supported names are:
 
 - Pi built-ins: `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls`.
 - MCP adapter names: `mcp`, `mcpScript`, `mcp__blender_mcp`, `mcp__svelte`, and `mcp__web_search`.
+- Context-mode tools: `ctx_execute`, `ctx_execute_file`, `ctx_index`, `ctx_search`, `ctx_fetch_and_index`, `ctx_batch_execute`, `ctx_stats`, `ctx_doctor`, `ctx_upgrade`, and `ctx_purge`.
+
+The default allowlist includes the Pi built-ins, MCP adapter names, and the normal non-destructive context-mode tools: `ctx_execute`, `ctx_execute_file`, `ctx_index`, `ctx_search`, `ctx_fetch_and_index`, `ctx_batch_execute`, `ctx_stats`, and `ctx_doctor`. `ctx_upgrade` and `ctx_purge` are supported but are not defaults; add either name explicitly only when that sensitive operation is intended.
 
 The child checks that these names are registered and active before it accepts input. An allowed adapter or gateway name can still reach capabilities controlled by that adapter or its server. The list does not prove server-side authorization or describe every action behind an opaque tool. Configure MCP servers and their permissions separately.
 
-`fusion.sidekickExtensions` supports `pi-mcp-adapter` and `context-mode`. Select `pi-mcp-adapter` when the tool list includes an MCP adapter name. Loading an extension does not automatically allow every tool that it provides. Fusion fails closed when a selected extension path is missing or a requested tool is not ready.
+`fusion.sidekickExtensions` supports `pi-mcp-adapter` and `context-mode`. Select `pi-mcp-adapter` when the tool list includes an MCP adapter name, and select `context-mode` when it includes a `ctx_*` tool. Loading an extension does not automatically allow every tool that it provides: an explicit `sidekickTools` array is passed unchanged to the child policy. Fusion fails closed when a selected extension path is missing or a requested tool is not ready.
 
 ## Configuration
 
-Set values in `.pi/settings.json` or the user-level Pi settings:
+Set values in `.pi/settings.json` or the user-level Pi settings. The following spells out the current default tool and extension policy:
 
 ```json
 {
   "fusion": {
     "sidekickModel": "provider/model[:thinking]",
     "timeoutMinutes": 10,
-    "sidekickTools": ["read", "bash", "edit", "write", "grep", "find", "ls"],
-    "sidekickExtensions": []
+    "sidekickTools": [
+      "read", "bash", "edit", "write", "grep", "find", "ls",
+      "mcp", "mcpScript", "mcp__blender_mcp", "mcp__svelte", "mcp__web_search",
+      "ctx_execute", "ctx_execute_file", "ctx_index", "ctx_search",
+      "ctx_fetch_and_index", "ctx_batch_execute", "ctx_stats", "ctx_doctor"
+    ],
+    "sidekickExtensions": ["pi-mcp-adapter", "context-mode"]
   }
 }
 ```
+
+Custom `sidekickTools` arrays are exact, rather than additions to these defaults. For example, a configuration that needs `ctx_upgrade` or `ctx_purge` must name that tool in `sidekickTools` and include `context-mode` in `sidekickExtensions`.
 
 The public configuration values are:
 
@@ -141,7 +151,7 @@ For example, `/fusion-model openai/gpt-5:high` selects a model and thinking leve
 
 Fusion saves the normalized value as `provider/model:thinking` in the project file `.pi/settings.json` under `fusion.sidekickModel`. The command writes the file before it changes the current session value. A failed write leaves the current session value unchanged. A cancelled selector, invalid model, invalid thinking level, malformed settings file, or other persistence error does not overwrite the file or change the runtime value.
 
-Fusion resolves the default in this order for each child launch:
+Fusion resolves the default in this order for each new `delegate` launch:
 
 1. A successful `/fusion-model` selection in the current session.
 2. `PI_FUSION_MODEL`.
@@ -151,7 +161,7 @@ Fusion resolves the default in this order for each child launch:
 
 A Pi restart clears the session selection. The normal environment, project, global, and fallback order then applies. Therefore, `PI_FUSION_MODEL` can temporarily take priority over the persisted project value after a restart.
 
-New `delegate` calls resolve the latest successful model and thinking selection immediately before launch. `follow_up` calls do the same. They do not reuse the model captured by the earlier run. A running child keeps its current model and thinking level. Fusion starts child launches from the parent's current working directory. A follow-up keeps the saved child session and its working directory.
+New `delegate` calls resolve the latest successful model and thinking selection immediately before launch. `/fusion-model` does not alter an existing task or its `follow_up` launches. A follow-up resumes the saved child session without model-selection flags, preserving a model change made inside that session. Fusion starts child launches from the parent's current working directory. A follow-up keeps the saved child session and its working directory.
 
 ## Cost accounting
 

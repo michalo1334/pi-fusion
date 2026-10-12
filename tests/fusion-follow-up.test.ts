@@ -269,44 +269,6 @@ test("LINEAGE-08 Unit: WHEN delegate is aborted during Zellij detection, THEN it
   assert.equal(fs.existsSync(path.join(sessionDir, "artifacts")), false);
 });
 
-test("FP-08/Integration: WHEN /fusion-model changes after delegate, THE follow-up SHALL use the latest model and thinking without replacing the session", async () => {
-  const calls: any[] = [];
-  const harness = makeHarness({
-    models: [
-      { provider: "offline", id: "fixture" },
-      { provider: "offline", id: "changed" },
-    ],
-    hasUI: true,
-    ui: { notify: () => {} },
-    run: async input => { calls.push(input); return result(input); },
-  });
-  const delegate = harness.tools.get("delegate");
-  const follow = harness.tools.get("follow_up");
-  const first = await call(delegate, { brief: "brief" }, harness.context);
-  await harness.commands.get("fusion-model").handler("offline/changed:medium", harness.context);
-  const second = await call(follow, { task_id: first.details.taskId, message: "continue" }, harness.context);
-  const later = await call(delegate, { brief: "new task" }, harness.context);
-  assert.equal(calls.length, 3);
-  assert.equal(calls[0].model.provider, "offline");
-  assert.equal(calls[0].model.id, "fixture");
-  assert.equal(calls[0].model.thinking, "high");
-  assert.equal(calls[1].model.provider, "offline");
-  assert.equal(calls[1].model.id, "changed");
-  assert.equal(calls[1].model.thinking, "medium");
-  assert.deepEqual(calls[1].model, calls[2].model);
-  assert.equal(calls[0].sessionId, calls[1].sessionId);
-  assert.equal(calls[0].sessionDir, calls[1].sessionDir);
-  assert.equal(calls[0].cwd, calls[1].cwd);
-  assert.deepEqual(calls[0].tools, calls[1].tools);
-  assert.deepEqual(calls[0].extensions, calls[1].extensions);
-  assert.equal(calls[0].timeoutMs, calls[1].timeoutMs);
-  assert.equal(calls[1].requireExistingSession, true);
-  assert.equal(calls[2].requireExistingSession, false);
-  assert.notEqual(first.details.costUsd, undefined);
-  assert.notEqual(second.details.costUsd, undefined);
-  assert.notEqual(later.details.costUsd, undefined);
-});
-
 test("CWD-01/Integration: WHEN the parent context cwd differs from process.cwd(), THE delegate and follow-up SHALL pass that cwd to each launch while reusing one session directory", async () => {
   const parentCwd = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-parent-cwd-"));
   assert.notEqual(parentCwd, process.cwd());
@@ -320,6 +282,7 @@ test("CWD-01/Integration: WHEN the parent context cwd differs from process.cwd()
         sessionId: input.sessionId,
         sessionFile: input.sessionFile,
         requireExistingSession: input.requireExistingSession,
+        hasModel: "model" in input,
       });
       return result(input);
     },
@@ -334,6 +297,8 @@ test("CWD-01/Integration: WHEN the parent context cwd differs from process.cwd()
   assert.equal(launches[1].sessionDir, launches[0].sessionDir);
   assert.equal(launches[1].sessionId, launches[0].sessionId);
   assert.equal(launches[1].sessionFile, launches[0].sessionFile);
+  assert.equal(launches[0].hasModel, true);
+  assert.equal(launches[1].hasModel, false);
   assert.equal(launches[1].requireExistingSession, true);
 });
 

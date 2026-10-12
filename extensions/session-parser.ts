@@ -377,6 +377,16 @@ export function createSessionCursor(file: string): SessionCursor {
 
 export const captureSessionCursor = createSessionCursor;
 
+/** Validate that a saved run cursor still points into the same session prefix. */
+export function validateSessionCursor(file: string, cursor: SessionCursor): void {
+  const snapshot = readSnapshot(file, cursor);
+  const parsed = parseComplete(snapshot.buffer, false);
+  if (cursor.sessionId && parsed.header.id !== cursor.sessionId) throw new SessionIntegrityError("Session header identity changed");
+  if (cursor.lastEntryId && !parsed.entries.some(entry => entry.id === cursor.lastEntryId)) {
+    throw new SessionIntegrityError("Session cursor entry is missing");
+  }
+}
+
 async function processHasExited(options: ReadRunOptions): Promise<boolean> {
   if (options.processExited !== undefined) return options.processExited;
   if (options.isProcessAlive) return !(await options.isProcessAlive());

@@ -8,6 +8,7 @@ import {
   pollRun,
   readIncrementalResult,
   requestRunCancellation,
+  validateSessionCursor,
   stopOwnedChild,
   type ChildLaunchSpec,
   type ExitRecord,
@@ -46,7 +47,16 @@ export interface ChildRunInput {
   prompt: string;
   parentPaneId: string;
   timeoutMs: number;
+  /** Follow-up runs must not silently create a new conversation. */
+  requireExistingSession?: boolean;
+  /** Revalidate the accepted prior session prefix before a follow-up launch. */
+  expectedSessionCursor?: SessionCursor;
   signal?: AbortSignal;
+}
+
+export interface ChildCleanupResult {
+  pending: boolean;
+  errorMessage?: string;
 }
 
 export interface ChildRunResult {
@@ -62,6 +72,10 @@ export interface ChildRunResult {
   surface?: ZellijSurface;
   errorMessage?: string;
   taskValid: boolean;
+  /** True when owned cleanup failed and the control must be retained for retry. */
+  cleanupPending?: boolean;
+  /** In-memory retry hook. It is not returned to the model-facing tool result. */
+  retryCleanup?: () => Promise<ChildCleanupResult>;
 }
 
 export interface ChildRunnerDependencies {
@@ -206,6 +220,10 @@ export async function runChildTask(
   const artifacts = allocateRunArtifacts(input.artifactRoot, input.taskId, input.runId);
   mkdirPrivate(input.sessionDir);
   const existingSessionFile = findSessionFile(input.sessionDir, input.sessionId);
+  if (input.requireExistingSession && !existingSessionFile) {
+    throw new Error(`Cannot resume child session ${input.sessionId}: the saved session file is missing or invalid`);
+  }
+  if (existingSessionFile && input.expectedSessionCursor) validateSessionCursor(existingSessionFile, input.expectedSessionCursor);
   const preRunCursor: SessionCursor = existingSessionFile
     ? captureSessionCursor(existingSessionFile)
     : { byteOffset: 0 };
@@ -246,6 +264,7 @@ export async function runChildTask(
   let closeStarted = false;
   let finalized = false;
   let stopError: string | undefined;
+  let cleanupPending = false;
 
   const stopChild = async (): Promise<string | undefined> => {
     if (stopStarted) return stopError;
@@ -276,13 +295,24 @@ export async function runChildTask(
           },
         });
       } catch (error) {
+        cleanupPending = true;
         errors.push(`owned child termination failed: ${errorText(error)}`);
       }
     } else if (!fs.existsSync(artifacts.exitPath)) {
+      if (surface) cleanupPending = true;
       errors.push("owned child did not establish a PID or exit record before the stop deadline");
     }
     stopError = errors.length > 0 ? errors.join("; ") : undefined;
     return stopError;
+  };
+
+  const retryCleanup = async (): Promise<ChildCleanupResult> => {
+    if (!cleanupPending) return { pending: false };
+    stopStarted = false;
+    stopError = undefined;
+    cleanupPending = false;
+    const errorMessage = await stopChild();
+    return { pending: cleanupPending, errorMessage };
   };
 
   const closeSurface = async (): Promise<Error | undefined> => {
@@ -305,6 +335,8 @@ export async function runChildTask(
     surface,
     errorMessage: joinErrors(evidence.errorMessage, errorMessage),
     taskValid: evidence.taskValid,
+    cleanupPending,
+    retryCleanup,
   });
 
   try {

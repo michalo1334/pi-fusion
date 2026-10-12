@@ -12,10 +12,10 @@ const temp = () => fs.mkdtempSync(path.join(os.tmpdir(), "fp07-runner-"));
 const model = { provider: "offline", id: "fixture", thinking: "off" };
 const surface: ZellijSurface = { paneId: "terminal_2", parentPaneId: "terminal_1" };
 
-function findArtifacts(root: string): RunArtifacts {
+function findArtifacts(root: string, runId?: string): RunArtifacts {
   const task = fs.readdirSync(root).find((name) => name !== "session")!;
   const taskDir = path.join(root, task);
-  const run = fs.readdirSync(path.join(taskDir, "runs"))[0];
+  const run = runId ?? fs.readdirSync(path.join(taskDir, "runs"))[0];
   const runDir = path.join(taskDir, "runs", run);
   return {
     taskDir, runDir,
@@ -191,6 +191,123 @@ test("FP-07/Integration: WHEN cancellation arrives before a delayed PID beyond t
   assert.equal(result.status, "aborted");
   assert.ok(interrupted >= 1);
   assert.equal(fs.readFileSync(result.artifacts.cancelPath, "utf8").trim(), result.runId);
+});
+
+test("FP-08/Integration: WHEN follow-up starts, THE runner SHALL resume the same session in a new pane and return only new report and usage", async () => {
+  const root = temp();
+  const sessionDir = path.join(root, "session");
+  const taskId = randomUUID();
+  let createCount = 0;
+  const controller: ZellijOperations = {
+    createSurface: async () => {
+      createCount += 1;
+      const runId = createCount === 1 ? firstRunId : secondRunId;
+      const artifacts = findArtifacts(root, runId);
+      if (createCount === 1) writeSession(sessionDir, "session", "first report");
+      else fs.appendFileSync(path.join(sessionDir, "session.jsonl"), [
+        JSON.stringify({ type: "message", id: "u2", parentId: "a1", timestamp: new Date(0).toISOString(), message: { role: "user", content: "follow up", timestamp: 0 } }),
+        JSON.stringify({ type: "message", id: "a2", parentId: "u2", timestamp: new Date(0).toISOString(), message: {
+          role: "assistant", content: [{ type: "text", text: "second report" }], stopReason: "stop", timestamp: 0,
+          usage: { input: 4, output: 5, totalTokens: 9, cost: { input: 0.4, output: 0.5, cacheRead: 0, cacheWrite: 0, total: 0.9 } },
+        } }), "",
+      ].join("\n"));
+      writeExitSidecar(artifacts.exitPath, { runId, exitCode: 0, finishedAt: new Date().toISOString() });
+      return { paneId: `terminal_${createCount + 1}`, parentPaneId: "terminal_1" };
+    },
+    sendCommand: async () => {}, interrupt: async () => {}, close: async () => {}, paneExists: async () => true, screen: async () => "",
+  };
+  const firstRunId = randomUUID();
+  const secondRunId = randomUUID();
+  const input = (runId: string, prompt: string) => ({
+    taskId, runId, cwd: root, artifactRoot: root, sessionDir, sessionId: "session", model,
+    tools: ["read"], extensions: [], childRuntimePath: path.join(root, "runtime"), systemPrompt: "system", prompt,
+    parentPaneId: "terminal_1", timeoutMs: 200,
+  });
+  const first = await runChildTask(input(firstRunId, "brief"), { zellij: controller });
+  const second = await runChildTask(input(secondRunId, "follow up"), { zellij: controller });
+  assert.equal(createCount, 2);
+  assert.equal(first.status, "ok");
+  assert.equal(second.status, "ok");
+  assert.equal(first.report, "first report");
+  assert.equal(second.report, "second report");
+  assert.equal(first.costUsd, 0.3);
+  assert.equal(second.costUsd, 0.9);
+  assert.equal(first.sessionFile, second.sessionFile);
+  assert.notDeepEqual(first.cursor, { byteOffset: 0 });
+  assert.equal(second.report.includes("first report"), false);
+});
+
+test("FP-08/Integration: WHEN the previous child turn fails with a provider error, THE runner SHALL permit a valid saved session to resume", async () => {
+  const root = temp();
+  const sessionDir = path.join(root, "session");
+  const taskId = randomUUID();
+  const firstRunId = randomUUID();
+  const secondRunId = randomUUID();
+  let createCount = 0;
+  const controller: ZellijOperations = {
+    createSurface: async () => {
+      createCount += 1;
+      const runId = createCount === 1 ? firstRunId : secondRunId;
+      const artifacts = findArtifacts(root, runId);
+      if (createCount === 1) {
+        writeSession(sessionDir, "session", "provider report");
+        writeExitSidecar(artifacts.exitPath, { runId: firstRunId, exitCode: 7, error: "provider error", finishedAt: new Date().toISOString() });
+      } else {
+        fs.appendFileSync(path.join(sessionDir, "session.jsonl"), [
+          JSON.stringify({ type: "message", id: "u2", parentId: "a1", timestamp: new Date(0).toISOString(), message: { role: "user", content: "retry", timestamp: 0 } }),
+          JSON.stringify({ type: "message", id: "a2", parentId: "u2", timestamp: new Date(0).toISOString(), message: {
+            role: "assistant", content: [{ type: "text", text: "recovered" }], stopReason: "stop", timestamp: 0,
+            usage: { input: 1, output: 1, totalTokens: 2, cost: { input: 0.1, output: 0.1, cacheRead: 0, cacheWrite: 0, total: 0.2 } },
+          } }), "",
+        ].join("\n"));
+        writeExitSidecar(artifacts.exitPath, { runId: secondRunId, exitCode: 0, finishedAt: new Date().toISOString() });
+      }
+      return { paneId: `terminal_${createCount + 2}`, parentPaneId: "terminal_1" };
+    },
+    sendCommand: async () => {}, interrupt: async () => {}, close: async () => {}, paneExists: async () => true, screen: async () => "",
+  };
+  const input = (runId: string) => ({ taskId, runId, cwd: root, artifactRoot: root, sessionDir, sessionId: "session", model,
+    tools: ["read"], extensions: [], childRuntimePath: path.join(root, "runtime"), systemPrompt: "system", prompt: "retry", parentPaneId: "terminal_1", timeoutMs: 200 });
+  const failed = await runChildTask(input(firstRunId), { zellij: controller });
+  const resumed = await runChildTask(input(secondRunId), { zellij: controller });
+  assert.equal(failed.status, "error");
+  assert.equal(failed.taskValid, true);
+  assert.equal(resumed.status, "ok");
+  assert.equal(resumed.report, "recovered");
+  assert.equal(resumed.costUsd, 0.2);
+});
+
+test("FP-08/Integration: WHEN termination fails, THE runner SHALL retain cleanup control for a bounded retry without closing the pane", async () => {
+  const root = temp();
+  const runId = randomUUID();
+  let artifacts!: RunArtifacts;
+  let interrupts = 0;
+  let closes = 0;
+  const controller: ZellijOperations = {
+    createSurface: async () => { artifacts = findArtifacts(root, runId); return surface; },
+    sendCommand: async () => {},
+    interrupt: async () => {
+      interrupts += 1;
+      if (interrupts === 1) throw new Error("termination denied");
+      writeExitSidecar(artifacts.exitPath, { runId, exitCode: 143, finishedAt: new Date().toISOString() });
+    },
+    close: async () => { closes += 1; },
+    paneExists: async () => false,
+    screen: async () => "",
+  };
+  const result = await runChildTask({
+    taskId: randomUUID(), runId, cwd: root, artifactRoot: root, sessionDir: path.join(root, "session"), sessionId: "session", model,
+    tools: ["read"], extensions: [], childRuntimePath: path.join(root, "runtime"), systemPrompt: "system", prompt: "brief",
+    parentPaneId: "terminal_1", timeoutMs: 100,
+  }, { zellij: controller });
+  assert.equal(result.status, "error");
+  assert.equal(result.cleanupPending, true);
+  assert.match(result.errorMessage ?? "", /termination denied/);
+  assert.equal(closes, 0);
+  const retry = await result.retryCleanup!();
+  assert.equal(retry.pending, false);
+  assert.equal(interrupts, 2);
+  assert.equal(closes, 0);
 });
 
 test("FP-07/Integration: WHEN cancellation arrives during result parsing, SHALL retain usage and keep the pane open", async () => {

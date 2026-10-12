@@ -22,12 +22,14 @@ import {
   checkZellij,
   resolveParentPaneId,
   runChildTask,
+  type ChildModel,
   type ChildRunResult,
 } from "./child-runner.ts";
 import {
   assertNoRecursiveFusionExtensions,
   assertNoRecursiveFusionTools,
 } from "./sidekick-policy.ts";
+import { SessionIntegrityError } from "./session-parser.ts";
 
 const MAX_LOG_LINES = 30;
 const SHORT_REPORT_CHARS = 200;
@@ -69,14 +71,202 @@ interface ChildTask {
   id: string;
   sessionId: string;
   sessionDir: string;
+  cwd: string;
+  artifactRoot: string;
+  model: ChildModel;
+  tools: string[];
+  extensions: string[];
+  childRuntimePath: string;
+  timeoutMs: number;
+  parentSessionKey: string;
   sessionFile?: string;
   validForFollowUp: boolean;
   status?: string;
-  /** Retain the latest run surface and artifacts for FP-08 cleanup/resume. */
+  activeRun?: { runId: string };
+  cleanupPending?: boolean;
+  cleanupError?: string;
+  resumeAfterCleanup?: boolean;
+  /** Retain the latest run surface, cursor, and evidence for follow-up. */
   lastRun?: ChildRunResult;
 }
 
 type Task = ChildTask;
+
+type ActiveChild = {
+  taskId: string;
+  runId: string;
+  generation: number;
+  controller: AbortController;
+  promise: Promise<ChildRunResult>;
+  settled: boolean;
+  artifactDir: string;
+  cleanupPending: boolean;
+  retryCleanup?: () => Promise<{ pending: boolean; errorMessage?: string }>;
+  cleanupPromise?: Promise<{ pending: boolean; errorMessage?: string }>;
+  lastResult?: ChildRunResult;
+  onCleanup?: (state: { pending: boolean; errorMessage?: string }) => void;
+};
+
+type SessionLedger = { pendingCost: number; accountedRuns: Set<string> };
+
+const lifecycleKey = Symbol.for("pi-fusion.child-lifecycle");
+const lifecycleGlobal = globalThis as typeof globalThis & {
+  [lifecycleKey]?: { generation: number; active: Map<string, ActiveChild>; ledgers: Map<string, SessionLedger> };
+};
+const lifecycle = lifecycleGlobal[lifecycleKey] ??= { generation: 0, active: new Map(), ledgers: new Map() };
+lifecycle.ledgers ??= new Map();
+
+function sessionLedger(key: string): SessionLedger {
+  let ledger = lifecycle.ledgers.get(key);
+  if (!ledger) {
+    ledger = { pendingCost: 0, accountedRuns: new Set() };
+    lifecycle.ledgers.set(key, ledger);
+  }
+  return ledger;
+}
+
+function recordRunCost(key: string, runId: string, costUsd: number): void {
+  const ledger = sessionLedger(key);
+  if (ledger.accountedRuns.has(runId)) return;
+  ledger.accountedRuns.add(runId);
+  if (Number.isFinite(costUsd) && costUsd > 0) ledger.pendingCost += costUsd;
+}
+
+function sessionKey(ctx: ExtensionContext): string {
+  return `${path.resolve(ctx.sessionManager.getSessionDir())}\u0000${ctx.sessionManager.getSessionId()}`;
+}
+
+function writeCleanupEvidence(active: ActiveChild, pending: boolean, errorMessage?: string): void {
+  const runDir = active.lastResult?.artifacts.runDir ?? active.artifactDir;
+  if (!runDir) return;
+  try {
+    fs.writeFileSync(path.join(runDir, "cleanup-state.json"), JSON.stringify({
+      taskId: active.taskId,
+      runId: active.runId,
+      pending,
+      error: errorMessage,
+      updatedAt: new Date().toISOString(),
+    }) + "\n", { encoding: "utf8", mode: 0o600 });
+  } catch {
+    // The active registry remains the authoritative in-memory control record.
+  }
+}
+
+/**
+ * Resource reload can replace this module without dispatching session_shutdown.
+ * Keep ownership in the process-global registry and cancel the old generation.
+ */
+async function retryActiveCleanup(run: ActiveChild): Promise<{ pending: boolean; errorMessage?: string }> {
+  if (!run.retryCleanup) return { pending: run.cleanupPending, errorMessage: "No cleanup control is available" };
+  if (run.cleanupPromise) return run.cleanupPromise;
+  run.cleanupPromise = run.retryCleanup();
+  try {
+    return await run.cleanupPromise;
+  } finally {
+    run.cleanupPromise = undefined;
+  }
+}
+
+function beginLifecycle(): number {
+  lifecycle.generation += 1;
+  for (const run of lifecycle.active.values()) run.controller.abort();
+  void stopActiveChildren();
+  return lifecycle.generation;
+}
+
+async function stopActiveChildren(): Promise<void> {
+  const active = [...lifecycle.active.values()];
+  for (const run of active) run.controller.abort();
+  const settled = await new Promise<boolean>(resolve => {
+    const timer = setTimeout(() => resolve(false), 5_000);
+    Promise.allSettled(active.map(run => run.promise)).then(() => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
+  if (!settled) {
+    for (const run of active) writeCleanupEvidence(run, true, "Child cleanup did not settle before the bounded shutdown deadline");
+    return;
+  }
+  for (const run of active) {
+    if (lifecycle.active.get(`${run.taskId}:${run.runId}`) !== run || !run.cleanupPending || !run.retryCleanup) continue;
+    try {
+      const state = await retryActiveCleanup(run);
+      run.cleanupPending = state.pending;
+      run.onCleanup?.(state);
+      writeCleanupEvidence(run, state.pending, state.errorMessage);
+      if (!state.pending && lifecycle.active.get(`${run.taskId}:${run.runId}`) === run) lifecycle.active.delete(`${run.taskId}:${run.runId}`);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      writeCleanupEvidence(run, true, errorMessage);
+    }
+  }
+}
+
+type ChildTaskRunner = (input: Parameters<typeof runChildTask>[0]) => ReturnType<typeof runChildTask>;
+
+async function runOwnedChild(
+  input: Omit<Parameters<typeof runChildTask>[0], "signal">,
+  parentSignal: AbortSignal | undefined,
+  expectedGeneration: number,
+  childRunner: ChildTaskRunner = runChildTask,
+  onCleanup?: (state: { pending: boolean; errorMessage?: string }) => void,
+): Promise<ChildRunResult> {
+  if (lifecycle.generation !== expectedGeneration) throw new Error("Fusion lifecycle changed before child launch");
+  const controller = new AbortController();
+  const forwardAbort = () => controller.abort();
+  if (parentSignal?.aborted) controller.abort();
+  else parentSignal?.addEventListener("abort", forwardAbort, { once: true });
+  const key = `${input.taskId}:${input.runId}`;
+  let resolveCompletion!: (result: ChildRunResult) => void;
+  let rejectCompletion!: (error: unknown) => void;
+  const completion = new Promise<ChildRunResult>((resolve, reject) => {
+    resolveCompletion = resolve;
+    rejectCompletion = reject;
+  });
+  // The registry observes this promise during shutdown. Consume rejection as
+  // well so a synchronous launch failure cannot create an unhandled rejection.
+  completion.catch(() => undefined);
+  const active: ActiveChild = {
+    taskId: input.taskId,
+    runId: input.runId,
+    generation: expectedGeneration,
+    controller,
+    promise: completion,
+    settled: false,
+    artifactDir: path.join(input.artifactRoot, input.taskId, "runs", input.runId),
+    cleanupPending: false,
+    onCleanup,
+  };
+  lifecycle.active.set(key, active);
+  try {
+    if (lifecycle.generation !== expectedGeneration) throw new Error("Fusion lifecycle changed before child launch");
+    let promise: ReturnType<typeof childRunner>;
+    try {
+      promise = childRunner({ ...input, signal: controller.signal });
+    } catch (error) {
+      rejectCompletion(error);
+      throw error;
+    }
+    promise.then(result => {
+      active.settled = true;
+      active.lastResult = result;
+      active.cleanupPending = Boolean(result.cleanupPending);
+      active.retryCleanup = result.retryCleanup;
+      onCleanup?.({ pending: active.cleanupPending, errorMessage: result.errorMessage });
+      resolveCompletion(result);
+      if (!active.cleanupPending && lifecycle.active.get(key) === active) lifecycle.active.delete(key);
+    }, error => {
+      active.settled = true;
+      rejectCompletion(error);
+      if (lifecycle.active.get(key) === active) lifecycle.active.delete(key);
+    });
+    return await promise;
+  } finally {
+    parentSignal?.removeEventListener("abort", forwardAbort);
+    if (!active.cleanupPending && lifecycle.active.get(key) === active) lifecycle.active.delete(key);
+  }
+}
 
 function readStringArray(value: unknown, fallback: readonly string[]): string[] {
   if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) return [...fallback];
@@ -237,25 +427,104 @@ function formatResult(task: ChildTask, result: ChildRunResult): { content: [{ ty
       sessionFile: result.sessionFile,
       sessionDir: task.sessionDir,
       costUsd: result.costUsd,
+      cleanupPending: result.cleanupPending ?? false,
+      cleanupError: result.errorMessage,
     },
   };
 }
 
-export default function (pi: ExtensionAPI) {
+export interface FusionRuntimeDependencies {
+  /** Test seam. Production uses the blocking child runner. */
+  runChildTask?: ChildTaskRunner;
+  /** Test seams avoid probing or mutating the host Zellij session. */
+  checkZellij?: typeof checkZellij;
+  resolveParentPaneId?: typeof resolveParentPaneId;
+}
+
+export function createFusionExtension(pi: ExtensionAPI, dependencies: FusionRuntimeDependencies = {}): void {
+  const childRunner = dependencies.runChildTask ?? runChildTask;
+  const detectZellij = dependencies.checkZellij ?? checkZellij;
+  const getParentPaneId = dependencies.resolveParentPaneId ?? resolveParentPaneId;
+  const generation = beginLifecycle();
   const tasks = new Map<string, Task>();
   let modelOverride: string | undefined;
-  let pendingCost = 0;
+  let parentSessionKey: string | undefined;
+  let disposed = false;
+  const current = () => !disposed && lifecycle.generation === generation;
+
+  pi.on("session_start", async (_event, ctx) => {
+    parentSessionKey = sessionKey(ctx);
+    sessionLedger(parentSessionKey);
+  });
 
   pi.on("message_end", async (event) => {
-    if (event.message.role !== "assistant" || pendingCost <= 0) return;
+    const ledger = parentSessionKey ? lifecycle.ledgers.get(parentSessionKey) : undefined;
+    if (!current() || event.message.role !== "assistant" || !ledger || ledger.pendingCost <= 0) return;
     const usage = (event.message as any).usage;
     // Keep the amount pending when a finalized lead message has no usage
-    // object. The next usable assistant message must receive the roll-forward.
+    // object. The next usable assistant message receives the roll-forward.
     if (!usage?.cost) return;
-    const add = pendingCost;
-    pendingCost = 0;
+    const add = ledger.pendingCost;
+    ledger.pendingCost = 0;
     return { message: { ...event.message, usage: { ...usage, cost: { ...usage.cost, total: usage.cost.total + add } } } };
   });
+
+  const runTask = async (
+    task: ChildTask,
+    prompt: string,
+    parentPaneId: string,
+    timeoutMs: number,
+    signal: AbortSignal | undefined,
+    requireExistingSession = false,
+  ): Promise<ChildRunResult> => {
+    if (!current()) throw new Error("Fusion lifecycle changed before child launch");
+    if (task.activeRun) throw new Error(`Task "${task.id}" is busy with run "${task.activeRun.runId}".`);
+    const runId = randomUUID();
+    task.activeRun = { runId };
+    try {
+      return await runOwnedChild({
+        taskId: task.id,
+        runId,
+        cwd: task.cwd,
+        artifactRoot: task.artifactRoot,
+        sessionDir: task.sessionDir,
+        sessionId: task.sessionId,
+        model: task.model,
+        tools: task.tools,
+        extensions: task.extensions,
+        childRuntimePath: task.childRuntimePath,
+        systemPrompt: PREAMBLE,
+        prompt,
+        parentPaneId,
+        timeoutMs,
+        requireExistingSession,
+        expectedSessionCursor: requireExistingSession ? task.lastRun?.cursor : undefined,
+      }, signal, generation, childRunner, state => {
+        if (!current()) return;
+        task.cleanupPending = state.pending;
+        task.cleanupError = state.errorMessage;
+        if (!state.pending && task.resumeAfterCleanup) task.validForFollowUp = true;
+      });
+    } finally {
+      if (task.activeRun?.runId === runId) delete task.activeRun;
+    }
+  };
+
+  const acceptResult = (task: ChildTask, result: ChildRunResult, onUpdate?: (update: any) => void): void => {
+    recordRunCost(task.parentSessionKey, result.runId, result.costUsd);
+    if (!current()) return;
+    task.cleanupPending = result.cleanupPending;
+    task.cleanupError = result.errorMessage;
+    task.sessionFile = result.sessionFile ?? task.sessionFile;
+    // A complete cursor and a matching session file are required. This keeps
+    // malformed or partial records from being resumed unsafely.
+    task.resumeAfterCleanup = result.taskValid && Boolean(result.sessionFile && result.cursor);
+    task.validForFollowUp = task.resumeAfterCleanup && !result.cleanupPending;
+    task.status = result.status;
+    task.lastRun = result;
+    // The process-global session ledger owns cost attribution.
+    onUpdate?.({ content: [{ type: "text", text: `Child ${task.id}: ${result.status}` }], details: {} });
+  };
 
   pi.registerCommand("fusion-model", {
     description: "Select or set the sidekick model for this Pi process (provider/model[:thinking])",
@@ -285,8 +554,9 @@ export default function (pi: ExtensionAPI) {
     renderCall(args, theme, context) { return renderPromptCall("delegate", args.brief, theme, context); },
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       // Detection is deliberately before UUIDs, artifact directories, and pane creation.
-      const detection = await checkZellij(process.env);
-      const parentPaneId = resolveParentPaneId(process.env);
+      const detection = await detectZellij(process.env);
+      if (!current()) throw new Error("Fusion lifecycle changed before child launch");
+      const parentPaneId = getParentPaneId(process.env);
       if (!detection.available || !parentPaneId) {
         throw new Error(detection.setupHint + (parentPaneId ? "" : " ZELLIJ_PANE_ID is missing from the host Pi environment."));
       }
@@ -299,34 +569,21 @@ export default function (pi: ExtensionAPI) {
       const extensions = selectedExtensionPaths(ctx.cwd, cfg.sidekickExtensions);
       const taskId = randomUUID();
       const sessionId = randomUUID();
-      const sessionDir = path.join(artifactRoot(ctx), taskId, "session");
-      const task: ChildTask = { kind: "child", id: taskId, sessionId, sessionDir, validForFollowUp: true };
+      if (!current()) throw new Error("Fusion lifecycle changed before child launch");
+      parentSessionKey = sessionKey(ctx);
+      sessionLedger(parentSessionKey);
+      const root = artifactRoot(ctx);
+      const sessionDir = path.join(root, taskId, "session");
+      const task: ChildTask = {
+        kind: "child", id: taskId, sessionId, sessionDir, cwd: ctx.cwd, artifactRoot: root,
+        model: modelInput(resolved.model, resolved.thinkingLevel), tools: [...tools], extensions: [...extensions],
+        childRuntimePath: childRuntimePath(), timeoutMs: cfg.timeoutMinutes * 60_000,
+        parentSessionKey, validForFollowUp: true,
+      };
       tasks.set(task.id, task);
       onUpdate?.({ content: [{ type: "text", text: `Starting child sidekick ${task.id} in ${parentPaneId}...` }], details: {} });
-      const result = await runChildTask({
-        taskId,
-        runId: randomUUID(),
-        cwd: ctx.cwd,
-        artifactRoot: artifactRoot(ctx),
-        sessionDir,
-        sessionId,
-        model: modelInput(resolved.model, resolved.thinkingLevel),
-        tools,
-        extensions,
-        childRuntimePath: childRuntimePath(),
-        systemPrompt: PREAMBLE,
-        prompt: params.brief,
-        parentPaneId,
-        timeoutMs: cfg.timeoutMinutes * 60_000,
-        signal,
-      });
-      task.sessionFile = result.sessionFile;
-      task.validForFollowUp = result.taskValid;
-      task.status = result.status;
-      task.lastRun = result;
-      // The runner has one finalizer. Fold this run exactly once into the lead.
-      pendingCost += result.costUsd;
-      onUpdate?.({ content: [{ type: "text", text: `Child ${task.id}: ${result.status}` }], details: {} });
+      const result = await runTask(task, params.brief, parentPaneId, task.timeoutMs, signal);
+      acceptResult(task, result, onUpdate);
       return formatResult(task, result);
     },
   });
@@ -334,27 +591,54 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "follow_up",
     label: "Follow up with sidekick",
-    description: "Continue an existing sidekick task. Child-session resume is being connected in FP-08; this transitional build returns a clear error instead of creating an in-process SDK sidekick.",
+    description: "Continue an existing sidekick task in a new restricted child Pi pane. The child resumes the saved session and the tool blocks until the new turn settles.",
     parameters: Type.Object({
       task_id: Type.String({ description: "task_id returned by delegate" }),
       message: Type.String({ description: "Feedback or additional instructions for the sidekick" }),
     }),
     renderCall(args, theme, context) { return renderPromptCall(`follow_up ${args.task_id ?? ""}`, args.message, theme, context); },
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId, params, signal, onUpdate) {
       const task = tasks.get(params.task_id);
       if (!task) {
         const known = [...tasks.keys()].join(", ") || "none";
         throw new Error(`Unknown task_id "${params.task_id}". Live tasks: ${known}. Use delegate to start a new task.`);
       }
-      if (task.kind === "child") {
-        throw new Error(`follow_up for child task "${task.id}" is unavailable until FP-08 session resume integration; no SDK sidekick was started.`);
+      if (task.activeRun) throw new Error(`Task "${task.id}" is busy with run "${task.activeRun.runId}".`);
+      if (task.cleanupPending) throw new Error(`Task "${task.id}" has unresolved child cleanup${task.cleanupError ? `: ${task.cleanupError}` : ""}.`);
+      if (!task.validForFollowUp || !task.sessionFile || !task.lastRun?.cursor) {
+        throw new Error(`Task "${task.id}" cannot resume because its session record is missing or invalid.`);
       }
-      throw new Error(`Unsupported transitional task "${task.id}".`);
+      const detection = await detectZellij(process.env);
+      if (!current()) throw new Error("Fusion lifecycle changed before child launch");
+      const parentPaneId = getParentPaneId(process.env);
+      if (!detection.available || !parentPaneId) {
+        throw new Error(detection.setupHint + (parentPaneId ? "" : " ZELLIJ_PANE_ID is missing from the host Pi environment."));
+      }
+      let result: ChildRunResult;
+      try {
+        result = await runTask(task, params.message, parentPaneId, task.timeoutMs, signal, true);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (error instanceof SessionIntegrityError || /saved child session|session prefix|session cursor/i.test(message)) {
+          task.validForFollowUp = false;
+        }
+        throw error;
+      }
+      acceptResult(task, result, onUpdate);
+      return formatResult(task, result);
     },
   });
 
   pi.on("session_shutdown", async () => {
-    // FP-08 owns the process-wide active-run registry and shutdown stop sequence.
+    if (lifecycle.generation !== generation) return;
+    disposed = true;
+    // Abort first, then await the runner's bounded handshake. The runner owns
+    // PID fingerprints and never closes an inspection pane on this path.
+    await stopActiveChildren();
     tasks.clear();
   });
+}
+
+export default function (pi: ExtensionAPI) {
+  createFusionExtension(pi);
 }

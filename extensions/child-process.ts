@@ -493,6 +493,7 @@ export function defaultArtifactRoot(): string {
 export {
   captureSessionCursor,
   createSessionCursor,
+  validateSessionCursor,
   readIncrementalResult,
   readRunResult,
   SessionIntegrityError,

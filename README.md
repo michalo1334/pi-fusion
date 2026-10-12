@@ -26,10 +26,11 @@ copy them into `.pi/extensions/` or `.pi/skills/`. Restart Pi after installation
   It keeps lead focus, targets the created pane by ID, and uses split, stacked, and tab placement fallbacks.
 - Successful panes close through the lead. Failed, interrupted, timed-out, or lost runs keep their pane and artifacts for
   inspection. Prompts stay in private run files; the pane receives an artifact wrapper command.
-- `follow_up(task_id, message)` is reserved for the child-session resume integration in FP-08. The current transitional
-  build returns an explicit error and never creates an in-process SDK sidekick.
+- `follow_up(task_id, message)` opens a new pane and resumes the same child session. It returns only the new report and
+  usage. A follow-up keeps the model, thinking level, tools, extensions, working directory, and timeout selected for
+  the original task.
 - Task IDs and child sessions are process-local to the lead. Child session files and run sidecars remain on disk for
-  inspection. A task is not silently resumed after a Pi restart.
+  inspection. A task is not silently resumed after a Pi restart. A busy task rejects concurrent follow-up calls.
 
 ## Lead skill
 

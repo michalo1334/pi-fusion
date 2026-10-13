@@ -61,11 +61,6 @@ export async function waitForFile(file: string, timeoutMs = 5_000): Promise<void
   }
 }
 
-export function makeExecutable(file: string, content: string): void {
-  fs.writeFileSync(file, content, { encoding: "utf8", mode: 0o700 });
-  fs.chmodSync(file, 0o700);
-}
-
 export function temporaryRoot(prefix: string): string {
   const root = fs.mkdtempSync(path.join("/tmp", `pi-fusion-${prefix}-`));
   fs.chmodSync(root, 0o700);

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import childRuntime from "../extensions/child-runtime.ts";
+import { withEnvironment } from "./fixtures/environment.ts";
 
 function tool(name: string) { return { name, description: "", parameters: {}, promptGuidelines: [] }; }
 
@@ -38,15 +39,15 @@ function harness(names: string[], configure?: (pi: any) => void) {
 }
 
 async function withEnv(tools: string | undefined, fn: () => Promise<void>) {
-  const oldChild = process.env.PI_FUSION_CHILD, oldTools = process.env.PI_FUSION_TOOLS;
-  const oldDeadline = process.env.PI_FUSION_POLICY_DEADLINE_MS, oldExit = process.exitCode;
-  process.env.PI_FUSION_CHILD = "1";
-  if (tools === undefined) delete process.env.PI_FUSION_TOOLS; else process.env.PI_FUSION_TOOLS = tools;
-  process.env.PI_FUSION_POLICY_DEADLINE_MS = "20"; process.exitCode = 0;
-  try { await fn(); } finally {
-    if (oldChild === undefined) delete process.env.PI_FUSION_CHILD; else process.env.PI_FUSION_CHILD = oldChild;
-    if (oldTools === undefined) delete process.env.PI_FUSION_TOOLS; else process.env.PI_FUSION_TOOLS = oldTools;
-    if (oldDeadline === undefined) delete process.env.PI_FUSION_POLICY_DEADLINE_MS; else process.env.PI_FUSION_POLICY_DEADLINE_MS = oldDeadline;
+  const oldExit = process.exitCode;
+  process.exitCode = 0;
+  try {
+    await withEnvironment({
+      PI_FUSION_CHILD: "1",
+      PI_FUSION_TOOLS: tools,
+      PI_FUSION_POLICY_DEADLINE_MS: "20",
+    }, fn);
+  } finally {
     process.exitCode = oldExit;
   }
 }

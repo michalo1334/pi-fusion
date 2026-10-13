@@ -1,17 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { allocateRunArtifacts, buildChildArgs, createPromptArtifact, parseProcStat, resolvePiExecutable } from "../extensions/child-process.ts";
+import { tempRoot } from "./fixtures/temp-root.ts";
 
 test("FP-05/Unit: Linux process identity parsing handles spaces and parentheses in comm", () => {
   const fields = ["R", ...Array.from({ length: 18 }, (_, index) => String(index + 1)), "987654", "0", "0"];
   assert.deepEqual(parseProcStat(`123 (worker (with spaces)) ${fields.join(" ")}`), { pid: 123, state: "R", startTime: "987654" });
 });
 
-test("FP-04/EARS: allocates unique private run artifacts", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-test-"));
+test("FP-04/EARS: allocates unique private run artifacts", (t) => {
+  const root = tempRoot(t, "fusion-test");
   const a = allocateRunArtifacts(root, "task.safe", "run-1");
   const b = allocateRunArtifacts(root, "task.safe", "run-2");
   assert.notEqual(a.runDir, b.runDir);
@@ -86,8 +86,8 @@ test("FP-04/Unit: SHALL resolve configured, PATH, and package Pi runtimes", () =
   assert.deepEqual(resolvePiExecutable({}, { which: () => undefined, packageEntry: () => "/runtime/pi.js" }), { file: process.execPath, prefix: ["/runtime/pi.js"] });
 });
 
-test("FP-04/EARS: prompt is stored as a file, not a shell command", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "fusion-prompt-"));
+test("FP-04/EARS: prompt is stored as a file, not a shell command", (t) => {
+  const root = tempRoot(t, "fusion-prompt");
   const file = path.join(root, "prompt.md");
   createPromptArtifact(file, "brief; $(danger)");
   assert.equal(fs.readFileSync(file, "utf8"), "brief; $(danger)");

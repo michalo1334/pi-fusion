@@ -1,7 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -18,6 +17,8 @@ import {
   type SessionCursor,
 } from "../extensions/child-process.ts";
 import { seedChildSessionFile } from "../extensions/session-lineage.ts";
+import { launchSpec as baseLaunchSpec } from "./fixtures/launch-spec.ts";
+import { tempRoot } from "./fixtures/temp-root.ts";
 
 const fixture = path.resolve("tests/fixtures/offline-provider.ts");
 const repo = path.resolve(".");
@@ -48,25 +49,17 @@ function sessionFile(sessionDir: string, sessionId: string): string {
   throw new Error(`Session ${sessionId} was not created`);
 }
 
-function runDirArtifacts(root: string, taskId: string, runId: string): RunArtifacts {
-  return allocateRunArtifacts(root, taskId, runId);
-}
-
 function launchSpec(root: string, taskId: string, runId: string, sessionDir: string, artifacts: RunArtifacts, tools = ["read"]): ChildLaunchSpec {
-  return {
+  return baseLaunchSpec(root, artifacts, {
     taskId,
     runId,
-    cwd: root,
-    artifactRoot: root,
     sessionDir,
     sessionId: "offline-session",
     model: { provider: "offline-faux", id: "offline", thinking: "off" },
     tools,
     extensions: [fixture],
-    promptPath: artifacts.promptPath,
-    systemPromptPath: artifacts.systemPromptPath,
     childRuntimePath: path.resolve("extensions/child-runtime.ts"),
-  };
+  });
 }
 
 async function runChild(
@@ -98,8 +91,8 @@ function assertArg(args: string[], ...expected: string[]): void {
   assert.ok(expected.every(value => args.includes(value)), `missing ${expected.join(", ")} in ${args.join(" ")}`);
 }
 
-test("FP09-01 Integration: WHEN a generated child runs with the local faux provider, THEN the real subprocess SHALL settle with policy, sidecar, session, and report evidence", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fusion-fp09-child-"));
+test("FP09-01 Integration: WHEN a generated child runs with the local faux provider, THEN the real subprocess SHALL settle with policy, sidecar, session, and report evidence", async (t) => {
+  const root = tempRoot(t, "pi-fusion-fp09-child");
   const taskId = `task-${randomUUID()}`;
   const runId = `run-${randomUUID()}`;
   const sessionDir = path.join(root, "sessions");
@@ -113,7 +106,7 @@ test("FP09-01 Integration: WHEN a generated child runs with the local faux provi
   fs.writeFileSync(path.join(root, ".pi", "prompts", "malicious.md"), "must not load");
   fs.writeFileSync(path.join(root, "AGENTS.md"), "must not load");
 
-  const artifacts = runDirArtifacts(root, taskId, runId);
+  const artifacts = allocateRunArtifacts(root, taskId, runId);
   const spec = launchSpec(root, taskId, runId, sessionDir, artifacts);
   createPromptArtifact(artifacts.promptPath, "Initial prompt content: fp09-child-input");
   createPromptArtifact(artifacts.systemPromptPath, "Child system policy: fp09-system-input");
@@ -145,13 +138,13 @@ test("FP09-01 Integration: WHEN a generated child runs with the local faux provi
   assert.equal(result.usage.cost.total, 0);
 });
 
-test("FP09-02 Integration: WHEN a new generated child resumes the stored session, THEN it SHALL append only the follow-up report and usage", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fusion-fp09-followup-"));
+test("FP09-02 Integration: WHEN a new generated child resumes the stored session, THEN it SHALL append only the follow-up report and usage", async (t) => {
+  const root = tempRoot(t, "pi-fusion-fp09-followup");
   const taskId = `task-${randomUUID()}`;
   const sessionDir = path.join(root, "sessions");
   const evidencePath = path.join(root, "fixture-evidence.json");
   const firstRunId = `run-${randomUUID()}`;
-  const firstArtifacts = runDirArtifacts(root, taskId, firstRunId);
+  const firstArtifacts = allocateRunArtifacts(root, taskId, firstRunId);
   const firstSpec = launchSpec(root, taskId, firstRunId, sessionDir, firstArtifacts);
   createPromptArtifact(firstArtifacts.promptPath, "first process prompt");
   createPromptArtifact(firstArtifacts.systemPromptPath, "system policy");
@@ -161,7 +154,7 @@ test("FP09-02 Integration: WHEN a new generated child resumes the stored session
   const cursor: SessionCursor = captureSessionCursor(file);
   const before = await readIncrementalResult(file, { byteOffset: 0 }, { processExited: true, exitStatus: { exitCode: 0 } });
   const secondRunId = `run-${randomUUID()}`;
-  const secondArtifacts = runDirArtifacts(root, taskId, secondRunId);
+  const secondArtifacts = allocateRunArtifacts(root, taskId, secondRunId);
   const secondSpec = { ...launchSpec(root, taskId, secondRunId, sessionDir, secondArtifacts), sessionFile: file, model: undefined, requireExistingSession: true };
   createPromptArtifact(secondArtifacts.promptPath, "follow-up process prompt");
   createPromptArtifact(secondArtifacts.systemPromptPath, "system policy");
@@ -178,8 +171,8 @@ test("FP09-02 Integration: WHEN a new generated child resumes the stored session
   assert.ok(evidence.messages.some(message => JSON.stringify(message.content).includes("offline-first")), "second process must see prior conversation");
 });
 
-test("LINEAGE-03 Integration: WHEN two offline child processes run, THE exact --session path SHALL preserve one seeded parent header and one follow-up file", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fusion-lineage-offline-"));
+test("LINEAGE-03 Integration: WHEN two offline child processes run, THE exact --session path SHALL preserve one seeded parent header and one follow-up file", async (t) => {
+  const root = tempRoot(t, "pi-fusion-lineage-offline");
   const taskId = `task-${randomUUID()}`;
   const sessionDir = path.join(root, "sessions");
   fs.mkdirSync(sessionDir, { recursive: true });
@@ -188,7 +181,7 @@ test("LINEAGE-03 Integration: WHEN two offline child processes run, THE exact --
   fs.writeFileSync(parentFile, `${JSON.stringify(parent.getHeader())}\n`, { mode: 0o600 });
   const childFile = seedChildSessionFile({ parentSessionFile: parentFile, childCwd: root, sessionDir, childSessionId: "offline-lineage" });
   const firstRunId = `run-${randomUUID()}`;
-  const firstArtifacts = runDirArtifacts(root, taskId, firstRunId);
+  const firstArtifacts = allocateRunArtifacts(root, taskId, firstRunId);
   const firstSpec = { ...launchSpec(root, taskId, firstRunId, sessionDir, firstArtifacts), sessionFile: childFile };
   createPromptArtifact(firstArtifacts.promptPath, "lineage first process");
   createPromptArtifact(firstArtifacts.systemPromptPath, "system policy");
@@ -202,7 +195,7 @@ test("LINEAGE-03 Integration: WHEN two offline child processes run, THE exact --
   const headerBefore = fs.readFileSync(childFile, "utf8").split("\n", 1)[0];
   const cursor = captureSessionCursor(childFile);
   const secondRunId = `run-${randomUUID()}`;
-  const secondArtifacts = runDirArtifacts(root, taskId, secondRunId);
+  const secondArtifacts = allocateRunArtifacts(root, taskId, secondRunId);
   const secondSpec = {
     ...launchSpec(root, taskId, secondRunId, sessionDir, secondArtifacts),
     sessionFile: childFile,
@@ -220,12 +213,12 @@ test("LINEAGE-03 Integration: WHEN two offline child processes run, THE exact --
   assert.equal(JSON.parse(headerBefore).parentSession, parentFile);
 });
 
-test("FP09-03 Integration: WHEN the child runtime policy fails before a model turn, THEN the wrapper SHALL write runtime-error and a non-success exit record", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fusion-fp09-policy-"));
+test("FP09-03 Integration: WHEN the child runtime policy fails before a model turn, THEN the wrapper SHALL write runtime-error and a non-success exit record", async (t) => {
+  const root = tempRoot(t, "pi-fusion-fp09-policy");
   const taskId = `task-${randomUUID()}`;
   const runId = `run-${randomUUID()}`;
   const sessionDir = path.join(root, "sessions");
-  const artifacts = runDirArtifacts(root, taskId, runId);
+  const artifacts = allocateRunArtifacts(root, taskId, runId);
   const spec = launchSpec(root, taskId, runId, sessionDir, artifacts, []);
   createPromptArtifact(artifacts.promptPath, "policy failure must not reach faux provider");
   createPromptArtifact(artifacts.systemPromptPath, "system policy");
@@ -241,12 +234,12 @@ test("FP09-03 Integration: WHEN the child runtime policy fails before a model tu
   assert.equal(fs.existsSync(path.join(root, "evidence.json")), false, "a policy failure must not make a model turn");
 });
 
-test("FUSION-CTX-05 Integration: WHEN a requested lazy tool is never registered, THEN the child SHALL write a policy sidecar before any model turn", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fusion-fp09-lazy-policy-"));
+test("FUSION-CTX-05 Integration: WHEN a requested lazy tool is never registered, THEN the child SHALL write a policy sidecar before any model turn", async (t) => {
+  const root = tempRoot(t, "pi-fusion-fp09-lazy-policy");
   const taskId = `task-${randomUUID()}`;
   const runId = `run-${randomUUID()}`;
   const sessionDir = path.join(root, "sessions");
-  const artifacts = runDirArtifacts(root, taskId, runId);
+  const artifacts = allocateRunArtifacts(root, taskId, runId);
   const evidencePath = path.join(root, "evidence.json");
   const spec = launchSpec(root, taskId, runId, sessionDir, artifacts, ["ctx_execute"]);
   createPromptArtifact(artifacts.promptPath, "missing lazy tool must not reach faux provider");

@@ -1,19 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { runChildTask } from "../extensions/child-runner.ts";
 import { writeExitSidecar, type RunArtifacts } from "../extensions/child-process.ts";
-import type { ZellijOperations, ZellijSurface } from "../extensions/zellij.ts";
-
-const temp = () => fs.mkdtempSync(path.join(os.tmpdir(), "fp07-runner-"));
-const model = { provider: "offline", id: "fixture", thinking: "off" };
+import type { ZellijSurface } from "../extensions/zellij.ts";
+import { childInput } from "./fixtures/child-input.ts";
+import { createZellijFake } from "./fixtures/zellij-fake.ts";
+import { tempRoot, type TestCleanup } from "./fixtures/temp-root.ts";
 const surface: ZellijSurface = { paneId: "terminal_2", parentPaneId: "terminal_1" };
-const defaultZellijOperations = {
-  closeRetainedSurface: async () => "not-found-or-unowned" as const,
-};
 
 function findArtifacts(root: string, runId?: string): RunArtifacts {
   const task = fs.readdirSync(root).find((name) => name !== "session")!;
@@ -40,16 +36,13 @@ function writeSession(sessionDir: string, sessionId: string, report: string): vo
   ].join("\n"));
 }
 
-async function runFake(options: { complete?: boolean; partial?: boolean; disappear?: boolean; createError?: boolean; exitCode?: number; signal?: AbortSignal } = {}) {
-  const root = temp();
+async function runFake(t: TestCleanup, options: { complete?: boolean; partial?: boolean; disappear?: boolean; createError?: boolean; exitCode?: number; signal?: AbortSignal } = {}) {
+  const root = tempRoot(t, "fp07-runner");
   const sessionDir = path.join(root, "session");
   const runId = randomUUID();
   let alive = true;
-  const controller: ZellijOperations & { closeCount: number; interruptCount: number; command?: readonly string[] } = {
-    ...defaultZellijOperations,
-    closeCount: 0, interruptCount: 0,
-    createSurface: async (input) => {
-      controller.command = input.command;
+  const zellij = createZellijFake({
+    createSurface: async () => {
       if (options.createError) throw new Error("surface startup failed");
       const artifacts = findArtifacts(root);
       if (options.disappear) { alive = false; return surface; }
@@ -59,148 +52,148 @@ async function runFake(options: { complete?: boolean; partial?: boolean; disappe
       }
       return surface;
     },
-    interrupt: async () => { controller.interruptCount++; alive = false; },
-    close: async () => { controller.closeCount++; alive = false; },
+    interrupt: async () => { alive = false; },
+    close: async () => { alive = false; },
     paneExists: async () => alive,
-  };
-  const result = await runChildTask({
-    taskId: randomUUID(), runId, cwd: root, artifactRoot: root, sessionDir, sessionId: "session", model,
-    tools: ["read"], extensions: [], childRuntimePath: path.join(root, "child-runtime.ts"),
-    systemPrompt: "system", prompt: "brief", parentPaneId: "terminal_1", timeoutMs: options.signal ? 100 : 100,
+  });
+  const result = await runChildTask(childInput(root, {
+    runId,
+    sessionDir,
+    childRuntimePath: path.join(root, "child-runtime.ts"),
     signal: options.signal,
-  }, { zellij: controller, sleep: async (ms) => new Promise((resolve) => setTimeout(resolve, ms)) });
-  return { result, controller };
+  }), { zellij: zellij.operations, sleep: async (ms) => new Promise((resolve) => setTimeout(resolve, ms)) });
+  return { result, zellij };
 }
 
-test("FP-07/Integration: WHEN a child reports success, SHALL return the new report and close its pane once", async () => {
-  const run = await runFake();
+test("FP-07/Integration: WHEN a child reports success, SHALL return the new report and close its pane once", async (t) => {
+  const run = await runFake(t);
   assert.equal(run.result.status, "ok");
   assert.equal(run.result.report, "child report");
   assert.equal(run.result.costUsd, 0.3);
-  assert.equal(run.controller.closeCount, 1);
-  assert.equal(run.controller.command?.length, 2);
+  assert.equal(run.zellij.calls.close.length, 1);
+  assert.equal(run.zellij.calls.createSurface[0]?.command?.length, 2);
 });
 
-test("FP-07/Unit: WHEN child surface startup fails, SHALL return an actionable error without a second spawn", async () => {
-  const run = await runFake({ createError: true });
+test("FP-07/Unit: WHEN child surface startup fails, SHALL return an actionable error without a second spawn", async (t) => {
+  const run = await runFake(t, { createError: true });
   assert.equal(run.result.status, "error");
   assert.match(run.result.errorMessage ?? "", /surface startup failed/);
-  assert.equal(run.controller.closeCount, 0);
+  assert.equal(run.zellij.calls.close.length, 0);
 });
 
-test("FP-07/Unit: WHEN the child reports a provider error, SHALL retain its pane and preserve the report evidence", async () => {
-  const run = await runFake({ exitCode: 7 });
+test("FP-07/Unit: WHEN the child reports a provider error, SHALL retain its pane and preserve the report evidence", async (t) => {
+  const run = await runFake(t, { exitCode: 7 });
   assert.equal(run.result.status, "error");
   assert.equal(run.result.report, "child report");
   assert.equal(run.result.costUsd, 0.3);
-  assert.equal(run.controller.closeCount, 0);
+  assert.equal(run.zellij.calls.close.length, 0);
 });
 
-test("FP-07/Unit: WHEN the owned pane disappears, SHALL retain the surface and return an error", async () => {
-  const run = await runFake({ disappear: true });
+test("FP-07/Unit: WHEN the owned pane disappears, SHALL retain the surface and return an error", async (t) => {
+  const run = await runFake(t, { disappear: true });
   assert.equal(run.result.status, "error");
-  assert.equal(run.controller.closeCount, 0);
+  assert.equal(run.zellij.calls.close.length, 0);
 });
 
-test("FP-07/Unit: WHEN the child does not settle before timeout, SHALL return timeout and retain its pane", async () => {
-  const run = await runFake({ complete: false });
+test("FP-07/Unit: WHEN the child does not settle before timeout, SHALL return timeout and retain its pane", async (t) => {
+  const run = await runFake(t, { complete: false });
   assert.equal(run.result.status, "timeout");
-  assert.equal(run.controller.closeCount, 0);
+  assert.equal(run.zellij.calls.close.length, 0);
 });
 
-test("FP-07/Integration: WHEN timeout follows billed assistant output, SHALL preserve new usage and report", async () => {
-  const run = await runFake({ complete: false, partial: true });
+test("FP-07/Integration: WHEN timeout follows billed assistant output, SHALL preserve new usage and report", async (t) => {
+  const run = await runFake(t, { complete: false, partial: true });
   assert.equal(run.result.status, "timeout");
   assert.equal(run.result.report, "child report");
   assert.equal(run.result.costUsd, 0.3);
-  assert.equal(run.controller.closeCount, 0);
+  assert.equal(run.zellij.calls.close.length, 0);
 });
 
-test("FP-07/Unit: WHEN pane interruption fails, SHALL return the termination error and retain the run", async () => {
-  const root = temp();
-  const controller: ZellijOperations = { ...defaultZellijOperations,
+test("FP-07/Unit: WHEN pane interruption fails, SHALL return the termination error and retain the run", async (t) => {
+  const root = tempRoot(t, "fp07-runner");
+  const zellij = createZellijFake({
     createSurface: async () => surface,
-    interrupt: async () => { throw new Error("interrupt denied"); }, close: async () => {},
+    interrupt: async () => { throw new Error("interrupt denied"); },
     paneExists: async () => false,
-  };
-  const result = await runChildTask({
-    taskId: randomUUID(), runId: randomUUID(), cwd: root, artifactRoot: root, sessionDir: path.join(root, "session"), sessionId: "session", model,
-    tools: ["read"], extensions: [], childRuntimePath: path.join(root, "runtime"), systemPrompt: "system", prompt: "brief",
-    parentPaneId: "terminal_1", timeoutMs: 100,
-  }, { zellij: controller });
+  });
+  const result = await runChildTask(childInput(root), { zellij: zellij.operations });
   assert.equal(result.status, "error");
   assert.match(result.errorMessage ?? "", /interrupt denied/);
 });
 
-test("FP-07/Unit: WHEN the owned PID fingerprint is invalid, SHALL report the stop failure", async () => {
-  const root = temp();
+test("FP-07/Unit: WHEN the owned PID fingerprint is invalid, SHALL report the stop failure", async (t) => {
+  const root = tempRoot(t, "fp07-runner");
   const runId = randomUUID();
-  const controller: ZellijOperations = { ...defaultZellijOperations,
-    createSurface: async () => { const artifacts = findArtifacts(root); fs.writeFileSync(artifacts.pidPath, JSON.stringify({ runId, pid: 99999 }) + "\n"); return surface; },
-    interrupt: async () => {}, close: async () => {}, paneExists: async () => false,
-  };
-  const result = await runChildTask({
-    taskId: randomUUID(), runId, cwd: root, artifactRoot: root, sessionDir: path.join(root, "session"), sessionId: "session", model,
-    tools: ["read"], extensions: [], childRuntimePath: path.join(root, "runtime"), systemPrompt: "system", prompt: "brief",
-    parentPaneId: "terminal_1", timeoutMs: 100,
-  }, { zellij: controller });
+  const zellij = createZellijFake({
+    createSurface: async () => {
+      const artifacts = findArtifacts(root);
+      fs.writeFileSync(artifacts.pidPath, JSON.stringify({ runId, pid: 99999 }) + "\n");
+      return surface;
+    },
+    interrupt: async () => {},
+    paneExists: async () => false,
+  });
+  const result = await runChildTask(childInput(root, { runId }), { zellij: zellij.operations });
   assert.equal(result.status, "error");
   assert.match(result.errorMessage ?? "", /owned child termination failed/);
 });
 
-test("FP-07/Unit: WHEN cancellation arrives before allocation, SHALL not create artifacts or a pane", async () => {
+test("FP-07/Unit: WHEN cancellation arrives before allocation, SHALL not create artifacts or a pane", async (t) => {
   const abort = new AbortController();
   abort.abort();
-  await assert.rejects(() => runFake({ signal: abort.signal }), /cancelled before allocation/);
+  await assert.rejects(() => runFake(t, { signal: abort.signal }), /cancelled before allocation/);
 });
 
-test("FP-07/Integration: WHEN cancellation arrives during delayed surface creation, SHALL suppress late child launch", async () => {
-  const root = temp();
+test("FP-07/Integration: WHEN cancellation arrives during delayed surface creation, SHALL suppress late child launch", async (t) => {
+  const root = tempRoot(t, "fp07-runner");
   const sessionDir = path.join(root, "session");
   const abort = new AbortController();
-  let creates = 0;
-  const controller: ZellijOperations = { ...defaultZellijOperations,
-    createSurface: async () => { creates++; await new Promise((resolve) => setTimeout(resolve, 30)); return surface; },
-    interrupt: async () => {}, close: async () => {},
+  const zellij = createZellijFake({
+    createSurface: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return surface;
+    },
+    interrupt: async () => {},
+    close: async () => {},
     paneExists: async () => true,
-  };
+  });
   setTimeout(() => abort.abort(), 5);
-  const result = await runChildTask({
-    taskId: randomUUID(), runId: randomUUID(), cwd: root, artifactRoot: root, sessionDir, sessionId: "session", model,
-    tools: ["read"], extensions: [], childRuntimePath: path.join(root, "runtime"), systemPrompt: "system", prompt: "brief",
-    parentPaneId: "terminal_1", timeoutMs: 200, signal: abort.signal,
-  }, { zellij: controller });
-  assert.equal(creates, 1);
+  const result = await runChildTask(childInput(root, {
+    sessionDir,
+    timeoutMs: 200,
+    signal: abort.signal,
+  }), { zellij: zellij.operations });
+  assert.equal(zellij.calls.createSurface.length, 1);
   assert.equal(result.status, "aborted");
   assert.equal(fs.readFileSync(result.artifacts.cancelPath, "utf8").trim(), result.runId);
 });
 
-test("FP-07/Integration: WHEN cancellation arrives before a delayed PID beyond the old grace, SHALL leave a cancellation handshake", async () => {
-  const root = temp();
+test("FP-07/Integration: WHEN cancellation arrives before a delayed PID beyond the old grace, SHALL leave a cancellation handshake", async (t) => {
+  const root = tempRoot(t, "fp07-runner");
   const abort = new AbortController();
-  let interrupted = 0;
-  const controller: ZellijOperations = { ...defaultZellijOperations,
+  const zellij = createZellijFake({
     createSurface: async () => surface,
-    interrupt: async () => { interrupted++; }, close: async () => {}, paneExists: async () => true,
-  };
-  const resultPromise = runChildTask({
-    taskId: randomUUID(), runId: randomUUID(), cwd: root, artifactRoot: root, sessionDir: path.join(root, "session"), sessionId: "session", model,
-    tools: ["read"], extensions: [], childRuntimePath: path.join(root, "runtime"), systemPrompt: "system", prompt: "brief",
-    parentPaneId: "terminal_1", timeoutMs: 200, signal: abort.signal,
-  }, { zellij: controller });
+    interrupt: async () => {},
+    close: async () => {},
+    paneExists: async () => true,
+  });
+  const resultPromise = runChildTask(childInput(root, {
+    timeoutMs: 200,
+    signal: abort.signal,
+  }), { zellij: zellij.operations });
   setTimeout(() => abort.abort(), 10);
   const result = await resultPromise;
   assert.equal(result.status, "aborted");
-  assert.ok(interrupted >= 1);
+  assert.ok(zellij.calls.interrupt.length >= 1);
   assert.equal(fs.readFileSync(result.artifacts.cancelPath, "utf8").trim(), result.runId);
 });
 
-test("FP-08/Integration: WHEN follow-up starts, THE runner SHALL resume the same session in a new pane and return only new report and usage", async () => {
-  const root = temp();
+test("FP-08/Integration: WHEN follow-up starts, THE runner SHALL resume the same session in a new pane and return only new report and usage", async (t) => {
+  const root = tempRoot(t, "fp07-runner");
   const sessionDir = path.join(root, "session");
   const taskId = randomUUID();
   let createCount = 0;
-  const controller: ZellijOperations = { ...defaultZellijOperations,
+  const zellij = createZellijFake({
     createSurface: async () => {
       createCount += 1;
       const runId = createCount === 1 ? firstRunId : secondRunId;
@@ -216,17 +209,20 @@ test("FP-08/Integration: WHEN follow-up starts, THE runner SHALL resume the same
       writeExitSidecar(artifacts.exitPath, { runId, exitCode: 0, finishedAt: new Date().toISOString() });
       return { paneId: `terminal_${createCount + 1}`, parentPaneId: "terminal_1" };
     },
-    interrupt: async () => {}, close: async () => {}, paneExists: async () => true,
-  };
+    close: async () => {},
+    paneExists: async () => true,
+  });
   const firstRunId = randomUUID();
   const secondRunId = randomUUID();
-  const input = (runId: string, prompt: string) => ({
-    taskId, runId, cwd: root, artifactRoot: root, sessionDir, sessionId: "session", model,
-    tools: ["read"], extensions: [], childRuntimePath: path.join(root, "runtime"), systemPrompt: "system", prompt,
-    parentPaneId: "terminal_1", timeoutMs: 200,
+  const input = (runId: string, prompt: string) => childInput(root, {
+    taskId,
+    runId,
+    sessionDir,
+    prompt,
+    timeoutMs: 200,
   });
-  const first = await runChildTask(input(firstRunId, "brief"), { zellij: controller });
-  const second = await runChildTask(input(secondRunId, "follow up"), { zellij: controller });
+  const first = await runChildTask(input(firstRunId, "brief"), { zellij: zellij.operations });
+  const second = await runChildTask(input(secondRunId, "follow up"), { zellij: zellij.operations });
   assert.equal(createCount, 2);
   assert.equal(first.status, "ok");
   assert.equal(second.status, "ok");
@@ -239,14 +235,14 @@ test("FP-08/Integration: WHEN follow-up starts, THE runner SHALL resume the same
   assert.equal(second.report.includes("first report"), false);
 });
 
-test("FP-08/Integration: WHEN the previous child turn fails with a provider error, THE runner SHALL permit a valid saved session to resume", async () => {
-  const root = temp();
+test("FP-08/Integration: WHEN the previous child turn fails with a provider error, THE runner SHALL permit a valid saved session to resume", async (t) => {
+  const root = tempRoot(t, "fp07-runner");
   const sessionDir = path.join(root, "session");
   const taskId = randomUUID();
   const firstRunId = randomUUID();
   const secondRunId = randomUUID();
   let createCount = 0;
-  const controller: ZellijOperations = { ...defaultZellijOperations,
+  const zellij = createZellijFake({
     createSurface: async () => {
       createCount += 1;
       const runId = createCount === 1 ? firstRunId : secondRunId;
@@ -266,12 +262,18 @@ test("FP-08/Integration: WHEN the previous child turn fails with a provider erro
       }
       return { paneId: `terminal_${createCount + 2}`, parentPaneId: "terminal_1" };
     },
-    interrupt: async () => {}, close: async () => {}, paneExists: async () => true,
-  };
-  const input = (runId: string) => ({ taskId, runId, cwd: root, artifactRoot: root, sessionDir, sessionId: "session", model,
-    tools: ["read"], extensions: [], childRuntimePath: path.join(root, "runtime"), systemPrompt: "system", prompt: "retry", parentPaneId: "terminal_1", timeoutMs: 200 });
-  const failed = await runChildTask(input(firstRunId), { zellij: controller });
-  const resumed = await runChildTask(input(secondRunId), { zellij: controller });
+    close: async () => {},
+    paneExists: async () => true,
+  });
+  const input = (runId: string) => childInput(root, {
+    taskId,
+    runId,
+    sessionDir,
+    prompt: "retry",
+    timeoutMs: 200,
+  });
+  const failed = await runChildTask(input(firstRunId), { zellij: zellij.operations });
+  const resumed = await runChildTask(input(secondRunId), { zellij: zellij.operations });
   assert.equal(failed.status, "error");
   assert.equal(failed.taskValid, true);
   assert.equal(resumed.status, "ok");
@@ -279,95 +281,90 @@ test("FP-08/Integration: WHEN the previous child turn fails with a provider erro
   assert.equal(resumed.costUsd, 0.2);
 });
 
-test("FP-08/Integration: WHEN termination fails, THE runner SHALL retain cleanup control for a bounded retry without closing the pane", async () => {
-  const root = temp();
+test("FP-08/Integration: WHEN termination fails, THE runner SHALL retain cleanup control for a bounded retry without closing the pane", async (t) => {
+  const root = tempRoot(t, "fp07-runner");
   const runId = randomUUID();
   let artifacts!: RunArtifacts;
   let interrupts = 0;
-  let closes = 0;
-  const controller: ZellijOperations = { ...defaultZellijOperations,
+  const zellij = createZellijFake({
     createSurface: async () => { artifacts = findArtifacts(root, runId); return surface; },
     interrupt: async () => {
       interrupts += 1;
       if (interrupts === 1) throw new Error("termination denied");
       writeExitSidecar(artifacts.exitPath, { runId, exitCode: 143, finishedAt: new Date().toISOString() });
     },
-    close: async () => { closes += 1; },
+    close: async () => {},
     paneExists: async () => false,
-  };
-  const result = await runChildTask({
-    taskId: randomUUID(), runId, cwd: root, artifactRoot: root, sessionDir: path.join(root, "session"), sessionId: "session", model,
-    tools: ["read"], extensions: [], childRuntimePath: path.join(root, "runtime"), systemPrompt: "system", prompt: "brief",
-    parentPaneId: "terminal_1", timeoutMs: 100,
-  }, { zellij: controller });
+  });
+  const result = await runChildTask(childInput(root, { runId }), { zellij: zellij.operations });
   assert.equal(result.status, "error");
   assert.equal(result.cleanupPending, true);
   assert.match(result.errorMessage ?? "", /termination denied/);
-  assert.equal(closes, 0);
+  assert.equal(zellij.calls.close.length, 0);
   const retry = await result.retryCleanup!();
   assert.equal(retry.pending, false);
   assert.equal(interrupts, 2);
-  assert.equal(closes, 0);
+  assert.equal(zellij.calls.close.length, 0);
 });
 
-test("FP-17 Unit: WHEN a valid follow-up has a retained failed pane, THEN it verifies closure before creating a fresh surface", async () => {
-  const root = temp();
+test("FP-17 Unit: WHEN a valid follow-up has a retained failed pane, THEN it verifies closure before creating a fresh surface", async (t) => {
+  const root = tempRoot(t, "fp07-runner");
   const sessionDir = path.join(root, "session");
   writeSession(sessionDir, "session", "first report");
   const events: string[] = [];
-  const controller: ZellijOperations = { ...defaultZellijOperations,
+  const zellij = createZellijFake({
     closeRetainedSurface: async () => { events.push("close-retained"); return "closed"; },
     createSurface: async () => { events.push("create"); throw new Error("stop after order check"); },
-    interrupt: async () => {}, close: async () => {}, paneExists: async () => false,
-  };
-  const outcome = await runChildTask({
-    taskId: randomUUID(), runId: randomUUID(), cwd: root, artifactRoot: root, sessionDir, sessionId: "session",
-    sessionFile: path.join(sessionDir, "session.jsonl"), requireExistingSession: true,
+  });
+  const outcome = await runChildTask(childInput(root, {
+    sessionDir,
+    model: undefined,
+    sessionFile: path.join(sessionDir, "session.jsonl"),
+    requireExistingSession: true,
     retainedFailureSurface: { surface, launchPath: "/private/old/launch.mjs" },
-    tools: ["read"], extensions: [], childRuntimePath: path.join(root, "runtime"), systemPrompt: "system", prompt: "retry",
-    parentPaneId: "terminal_1", timeoutMs: 100,
-  }, { zellij: controller });
+    prompt: "retry",
+  }), { zellij: zellij.operations });
   assert.equal(outcome.status, "error");
   assert.deepEqual(events, ["close-retained", "create"]);
 
   const fallbackEvents: string[] = [];
-  const missingController: ZellijOperations = { ...defaultZellijOperations,
+  const missingZellij = createZellijFake({
     closeRetainedSurface: async () => { fallbackEvents.push("lookup"); return "not-found-or-unowned"; },
     createSurface: async () => { fallbackEvents.push("create"); throw new Error("missing pane fallback checked"); },
-    interrupt: async () => {}, close: async () => {}, paneExists: async () => false,
-  };
-  const fallback = await runChildTask({
-    taskId: randomUUID(), runId: randomUUID(), cwd: root, artifactRoot: root, sessionDir, sessionId: "session",
-    sessionFile: path.join(sessionDir, "session.jsonl"), requireExistingSession: true,
+  });
+  const fallback = await runChildTask(childInput(root, {
+    sessionDir,
+    model: undefined,
+    sessionFile: path.join(sessionDir, "session.jsonl"),
+    requireExistingSession: true,
     retainedFailureSurface: { surface, launchPath: "/private/missing/launch.mjs" },
-    tools: ["read"], extensions: [], childRuntimePath: path.join(root, "runtime"), systemPrompt: "system", prompt: "retry",
-    parentPaneId: "terminal_1", timeoutMs: 100,
-  }, { zellij: missingController });
+    prompt: "retry",
+  }), { zellij: missingZellij.operations });
   assert.equal(fallback.status, "error");
   assert.deepEqual(fallbackEvents, ["lookup", "create"]);
 });
 
-test("FP-17 Unit: WHEN retained-pane close fails before creation, THEN it rejects directly without synthetic child cleanup", async () => {
-  const root = temp();
+test("FP-17 Unit: WHEN retained-pane close fails before creation, THEN it rejects directly without synthetic child cleanup", async (t) => {
+  const root = tempRoot(t, "fp07-runner");
   const sessionDir = path.join(root, "session");
   writeSession(sessionDir, "session", "prior report");
-  let creates = 0;
-  let interrupts = 0;
   let sleeps = 0;
   const abort = new AbortController();
   const runId = randomUUID();
-  const controller: ZellijOperations = { ...defaultZellijOperations,
+  const zellij = createZellijFake({
     closeRetainedSurface: async () => { throw new Error("Verified retained pane terminal_2 could not close: close denied"); },
-    createSurface: async () => { creates++; return surface; },
-    interrupt: async () => { interrupts++; }, close: async () => {}, paneExists: async () => false,
-  };
-  await assert.rejects(() => runChildTask({
-    taskId: "close-failure", runId, cwd: root, artifactRoot: root, sessionDir, sessionId: "session",
-    sessionFile: path.join(sessionDir, "session.jsonl"), requireExistingSession: true,
+  });
+  await assert.rejects(() => runChildTask(childInput(root, {
+    taskId: "close-failure",
+    runId,
+    sessionDir,
+    model: undefined,
+    sessionFile: path.join(sessionDir, "session.jsonl"),
+    requireExistingSession: true,
     retainedFailureSurface: { surface, launchPath: "/private/old/launch.mjs" },
-    tools: ["read"], extensions: [], childRuntimePath: path.join(root, "runtime"), systemPrompt: "system", prompt: "retry",
-    parentPaneId: "terminal_1", timeoutMs: 100, signal: abort.signal,
-  }, { zellij: controller, sleep: async () => { sleeps++; } }), error => {
+    prompt: "retry",
+    signal: abort.signal,
+  }), { zellij: zellij.operations, sleep: async () => { sleeps++; } }), error => {
     const message = error instanceof Error ? error.message : String(error);
     assert.match(message, /Verified retained pane terminal_2 could not close: close denied/);
     assert.doesNotMatch(message, /owned child did not establish a PID/);
@@ -375,59 +372,57 @@ test("FP-17 Unit: WHEN retained-pane close fails before creation, THEN it reject
   });
   abort.abort();
   assert.equal(fs.existsSync(path.join(root, "close-failure", "runs", runId, "cancel")), false);
-  assert.equal(creates, 0);
-  assert.equal(interrupts, 0);
+  assert.equal(zellij.calls.createSurface.length, 0);
+  assert.equal(zellij.calls.interrupt.length, 0);
   assert.equal(sleeps, 0);
 });
 
-test("FP-17 Unit: WHEN a launch is fresh, or the session or signal is invalid, THEN it does not close a retained pane", async () => {
-  const root = temp();
-  let retainedCloses = 0;
-  const controller: ZellijOperations = { ...defaultZellijOperations,
-    closeRetainedSurface: async () => { retainedCloses++; return "closed"; },
+test("FP-17 Unit: WHEN a launch is fresh, or the session or signal is invalid, THEN it does not close a retained pane", async (t) => {
+  const root = tempRoot(t, "fp07-runner");
+  const zellij = createZellijFake({
+    closeRetainedSurface: async () => "closed",
     createSurface: async () => { throw new Error("fresh launch checked"); },
-    interrupt: async () => {}, close: async () => {}, paneExists: async () => false,
-  };
-  const base = {
-    taskId: randomUUID(), runId: randomUUID(), cwd: root, artifactRoot: root, sessionDir: path.join(root, "session"), sessionId: "session",
-    model, tools: ["read"], extensions: [], childRuntimePath: path.join(root, "runtime"), systemPrompt: "system", prompt: "retry",
-    parentPaneId: "terminal_1", timeoutMs: 100,
+  });
+  const base = childInput(root, {
+    prompt: "retry",
     retainedFailureSurface: { surface, launchPath: "/private/old/launch.mjs" },
-  };
-  await runChildTask(base, { zellij: controller });
-  assert.equal(retainedCloses, 0, "fresh delegates do not replace panes");
+  });
+  await runChildTask(base, { zellij: zellij.operations });
+  assert.equal(zellij.calls.closeRetainedSurface.length, 0, "fresh delegates do not replace panes");
 
   writeSession(base.sessionDir, "session", "prior report");
   await assert.rejects(() => runChildTask({
     ...base, runId: randomUUID(), requireExistingSession: true, sessionFile: path.join(base.sessionDir, "session.jsonl"),
     expectedSessionCursor: { byteOffset: 999_999, sessionId: "session" },
-  }, { zellij: controller }), /cursor/i);
+  }, { zellij: zellij.operations }), /cursor/i);
   const aborted = new AbortController();
   aborted.abort();
-  await assert.rejects(() => runChildTask({ ...base, runId: randomUUID(), signal: aborted.signal }, { zellij: controller }), /cancelled before allocation/);
-  assert.equal(retainedCloses, 0);
+  await assert.rejects(() => runChildTask({ ...base, runId: randomUUID(), signal: aborted.signal }, { zellij: zellij.operations }), /cancelled before allocation/);
+  assert.equal(zellij.calls.closeRetainedSurface.length, 0);
 });
 
-test("FP-07/Integration: WHEN cancellation arrives during result parsing, SHALL retain usage and keep the pane open", async () => {
-  const root = temp();
+test("FP-07/Integration: WHEN cancellation arrives during result parsing, SHALL retain usage and keep the pane open", async (t) => {
+  const root = tempRoot(t, "fp07-runner");
   const sessionDir = path.join(root, "session");
   const abort = new AbortController();
   const runId = randomUUID();
-  const controller: ZellijOperations = { ...defaultZellijOperations,
+  const zellij = createZellijFake({
     createSurface: async () => {
       const artifacts = findArtifacts(root);
       writeSession(sessionDir, "session", "child report");
       writeExitSidecar(artifacts.exitPath, { runId, exitCode: 0, finishedAt: new Date().toISOString() });
       return surface;
-    }, interrupt: async () => {}, close: async () => { throw new Error("must not close"); },
+    },
+    close: async () => { throw new Error("must not close"); },
     paneExists: async () => true,
-  };
+  });
   let findCalls = 0;
-  const result = await runChildTask({
-    taskId: randomUUID(), runId, cwd: root, artifactRoot: root, sessionDir, sessionId: "session", model,
-    tools: ["read"], extensions: [], childRuntimePath: path.join(root, "runtime"), systemPrompt: "system", prompt: "brief",
-    parentPaneId: "terminal_1", timeoutMs: 200, signal: abort.signal,
-  }, { zellij: controller, findSessionFile: (dir, id) => { findCalls++; if (findCalls >= 2) abort.abort(); return path.join(dir, `${id}.jsonl`); } });
+  const result = await runChildTask(childInput(root, {
+    runId,
+    sessionDir,
+    timeoutMs: 200,
+    signal: abort.signal,
+  }), { zellij: zellij.operations, findSessionFile: (dir, id) => { findCalls++; if (findCalls >= 2) abort.abort(); return path.join(dir, `${id}.jsonl`); } });
   assert.equal(result.status, "aborted");
   assert.equal(result.report, "child report");
   assert.equal(result.costUsd, 0.3);

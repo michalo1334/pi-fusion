@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -10,12 +9,12 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import { tempRoot, type TestCleanup } from "./fixtures/temp-root.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-async function loadPackage(t: { after: (fn: () => void) => void }) {
-  const temp = mkdtempSync(join(tmpdir(), "fusion-package-"));
-  t.after(() => rmSync(temp, { recursive: true, force: true }));
+async function loadPackage(t: TestCleanup) {
+  const temp = tempRoot(t, "fusion-package");
   const cwd = join(temp, "consumer");
   const agentDir = join(temp, "agent");
   mkdirSync(join(cwd, ".pi"), { recursive: true });
